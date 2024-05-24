@@ -1,0 +1,114 @@
+#!/bin/bash
+source $( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )/common.lib
+
+# This will trigger the downstream job, and return queue ID back to upstream
+eb_trigger(){
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local trigger_url=$(standardize_string ${2?trigger_url is required})
+    local wait=${3?wait is required}
+    local jenkins_host=$(echo ${trigger_url} | grep -oE "^https?://[^/]*")
+    local job_path=$(echo ${trigger_url} | grep -oE "^http?s?://[^?]*" | xargs dirname)
+    local queue_id=$(curl -D - -X POST -n -sS ${trigger_url} | grep Location | rev | sed -e 's/^\/*//' | tr -d '\r' | cut -d"/" -f2 | rev)
+    local exe_url=""
+    if [[ "${wait}" == "true" ]]; then
+        local queue_url="${jenkins_host}/queue/item/${queue_id}/api/json?pretty=true"
+        while [[ "$(curl -n -s ${queue_url} | jq --raw-output '.blocked')" == "true" ]]; do
+            sleep 5
+        done
+        while [[ "x${exe_url}" == "x" ]] || [[ "${exe_url}" == "null" ]]; do
+            sleep 2
+            exe_url="$(curl -n -s "${queue_url}" | jq --raw-output '.executable.url')"
+        done
+        echo "$(standardize_string ${exe_url})"
+    fi
+}
+
+eb_query(){
+    local triggered_job_url=$(standardize_string ${1?triggered_job_url is required})
+    local timeout=${2?timeout is required}
+    local jenkins_host=$(echo ${trigger_url} | grep -oE "^https?://[^/]*")
+    local result="null"
+    local start=$(date +%s)
+    local build_not_complete=true
+    while [ $(( $(date +%s) - ${timeout} )) -lt ${start} ]; do
+        sleep 2
+        build_not_complete="$(curl -n -s "${triggered_job_url}api/json?pretty=true" | jq --raw-output '.building')"
+        if [[ "${build_not_complete}" == "false" ]]; then
+            result=$(curl -n -s "${triggered_job_url}api/json?pretty=true" | jq --raw-output '.result')
+            break
+        fi
+    done
+    [[ "${result}" == "null" ]] && echo "TIMEOUT" || echo "$(standardize_string ${result})"
+}
+
+# eb_build for freestyle job:
+# eb_build --job "${job}" --wait true --propagate false --timeout 10
+eb_build(){
+    set +x
+    local job=""
+    local wait=true
+    local propagate=true
+    local timeout=1800 # Default 30 minutes
+    local RET=0
+    options=$(getopt -l "job:,wait:,propagate:,timeout:" -o "j:w:p:t" -a -- "$@")
+    eval set -- "${options}"
+
+    while true; do
+        case $1 in
+        -j|--job)
+            shift
+            job=${1}
+            ;;
+        -w|--wait)
+            shift
+            wait=${1}
+            ;;
+        -p|--propagate)
+            shift
+            propagate=${1}
+            ;;
+        -t|--timeout)
+            shift
+            timeout=${1}
+            ;;
+        --)
+            shift
+            break;;
+        *)
+            echo "Wrong input";
+            return 1;;
+        esac
+    shift
+    done
+
+    echo "Scheduling project: $(echo ${job} | grep -oE "^http?s?://[^?]*" | xargs dirname)"
+    triggered_job_url=$(eb_trigger "${job}" ${wait})
+    if [[ "${wait}" == "true" ]] && [[ "x${triggered_job_url}" != "x" ]]; then
+        echo "Starting building: ${triggered_job_url}"
+        result=$(eb_query "${triggered_job_url}" ${timeout})
+        [[ ! "${result}" =~ .*SUCCESS.* ]] && [[ "${propagate}" == "true" ]] && RET=1
+        echo "Result: ${triggered_job_url}: ${result}"
+    fi
+    return ${RET}
+}
+
+remove_jenkins_build(){
+    local build_url=${1?build_url is required}
+    local result="$(curl -D - -X POST -n -sS ${build_url}/doDelete | grep -E "302\s+Found")"
+    if [[ "x${result}" == "x" ]]; then
+        echo "ERROR: ${build_url} NOT FOUND!"
+    else
+        echo "SUCCESS: ${build_url} DELETED!"
+    fi
+}
+
+fetch_jenkins_log(){
+    local build_url=${1?build_url is required}
+    local log_path=${2?log_path is required}
+    [ -f ${log_path} ] && rm -rf ${log_path}
+    curl -s --insecure --netrc --connect-timeout 5 \
+    --max-time 20 --retry 5 --retry-delay 0 \
+    --retry-max-time 40 "${build_url}timestamps/?time=HH:mm:ss&appendLog&locale=en_US" > ${log_path}
+}

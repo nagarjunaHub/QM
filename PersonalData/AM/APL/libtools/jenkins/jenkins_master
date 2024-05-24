@@ -1,0 +1,93 @@
+1> Install jenkins: 
+    $> wget -q -O - https://pkg.jenkins.io/debian/jenkins-ci.org.key | sudo apt-key add -
+    $> sudo sh -c 'echo deb http://pkg.jenkins.io/debian-stable binary/ > /etc/apt/sources.list.d/jenkins.list'
+    $> sudo apt-get update
+    $>sudo apt-get install jenkins
+
+2> Upgrade
+    $> sudo apt-get update
+    $> sudo apt-get install jenkins
+
+3> Configuration: 
+    - Change HTTP_HOST HTTP_PORT : /etc/default/jenkins
+    Eg: HTTP_HOST=127.0.3.1
+        HTTP_PORT=8192  (From now on will use this port as example)
+
+4> Using Linux iptables for port 80 -> 8192
+    $> sudo vi /etc/rc.local
+    #Requests from outside
+    $> iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-ports 8192
+    #Requests from localhost
+    $> iptables -t nat -I OUTPUT -p tcp -d 127.0.3.1 --dport 80 -j REDIRECT --to-ports 8192
+
+    Run sudo /etc/rc.local to enable port forwarding
+
+5> Setting up an Apache Proxy for port 80 -> 8080
+    This configuration will setup Apache2 to proxy port 80 to 8192 so that you can keep Jenkins on 8192.
+    $> sudo aptitude install apache2
+    $> sudo a2enmod proxy
+    $> sudo a2enmod proxy_http
+    $> sudo a2dissite default
+    If you get ERROR: Site default does not exist! then try this instead:
+    
+    $> sudo a2dissite 000-default
+    
+    And if all else fails just have a look if there is a default site set up at all:
+    
+    ls /etc/apache2/sites-enabled/
+
+    Create a file called jenkins.conf in /etc/apache2/sites-available (For localhost you can change name to other, by change in /etc/hosts, here change to q-jenkins)
+        <VirtualHost *:80>
+            ServerAdmin webmaster@q-jenkins
+            ServerName your_host_name
+            ServerAlias your_host_name_alias
+            ProxyRequests Off
+            <Proxy *>
+                Order deny,allow
+                Allow from all
+            </Proxy>
+            ProxyPreserveHost on
+            ProxyPass / http://q-jenkins:8192/ nocanon
+            AllowEncodedSlashes NoDecode
+        </VirtualHost>
+
+    $> sudo a2ensite jenkins
+    $> sudo apache2ctl restart
+
+6> Setting up an Nginx Proxy for port 80 -> 8192:
+    Install Nginx.
+    $> sudo apt -y install nginx
+
+    Remove default configuration:
+    $> cd /etc/nginx/sites-available
+    $> sudo rm default ../sites-enabled/default
+
+    Create new configuration for Jenkins ()
+    $> sudo vi /etc/nginx/sites-available/jenkins
+
+        upstream app_server {
+            server 127.0.3.1:8192 fail_timeout=0;
+        }
+         
+        server {
+            listen 80;
+            listen [::]:80 default ipv6only=on;
+            server_name your_host_name;
+         
+            location / {
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header Host $http_host;
+                proxy_redirect off;
+         
+                if (!-f $request_filename) {
+                    proxy_pass http://app_server;
+                    break;
+                }
+            }
+        }
+
+    Link your configuration from sites-available to sites-enabled:
+    $> sudo ln -sf /etc/nginx/sites-available/jenkins /etc/nginx/sites-enabled/
+
+    Restart Nginx:
+    $> sudo service nginx restart

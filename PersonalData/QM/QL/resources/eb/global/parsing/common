@@ -1,0 +1,48 @@
+# INFO
+info /(?i)feedbackComposer --- /
+
+# WARNING
+warning /(?i)warning:/
+warning /bad substitution/
+warning /(?i)error [1-9]?[0-9]+ (ignored)/
+
+# ERROR
+error /(?i)\baborted\b/
+error /(?i)cannot create directory/
+error /(?i)command not found/
+error /(?i)connection refused/
+error /(?i)could not connect to/
+error /(?i)could not generate \w+ report/
+error /(?i)cp: cannot stat/
+error /(?i)directory not empty/
+error /(?i)error [1-9]?[0-9]+$/
+error /(?i)error in file io/
+error /(?i)error occurred during build/
+error /(?i)error while loading shared libraries/
+error /(?i)error: cannot fetch/
+error /(?i)file read error:/
+error /(?i)illegal number of parameters/
+error /(?i)indexerror: list index out of range/
+error /(?i)mv: cannot stat/
+error /(?i)no space left on device/
+error /(?i)permission denied/
+error /(?i)recipe for target.*failed/
+error /(?i)ret_code=[1-9][0-9]*$/
+error /(?i)returned [1-9][0-9]* exit status/
+error /(?i)rsync error:/
+error /(?i)sed: can't read/
+error /(?i)unable to access license server/
+error /(?i)license check failed/
+error /(?i)unable to acquire lock/
+error /(?i)unable to recognise the format of the input file/
+error /(?i)undefined reference to/
+error /(?i)undefined symbol/
+error /(?i)unhandled exception/
+error /(?i)unknown command/
+error /(?i)valueerror/
+error /(?i)script returned exit code/
+error /(?i)waiting for unfinished jobs/
+error /(?i)prohibited by Gerrit/
+error /(?i)\[error\]/
+error /(?i)error: \[error\]/
+error /(?i)error: task/

@@ -1,0 +1,310 @@
+#!/bin/bash
+# Use this for loading variant specific shall functions.
+#
+#
+
+aosp_build() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local source_volume=${2?source_volume is required}
+    local lunch_target=${3?lunch_target is required}
+    local make_target=${4?make_target is required}
+    local ota_gen=${5?ota_gen is required}
+    local ota_customized_method=${6?ota_customized_method is required}
+    local ota_script=${7?ota_script is required}
+    local swup_gen=${8?swup_gen is required}
+    local swup_script=${9?swup_script is required}
+    local ccache_enabled=${10?ccache_enabled is required}
+    local ccache_exec=${11?ccache_exec is required}
+    local ccache_dir=${12?ccache_dir is required}
+    local ccache_umask=${13?ccache_umask is required}
+    local ccache_max_size=${14?ccache_max_size is required}
+    local build_name=${15?'Need build name'}
+    local user_custom_build_env=${16:-''}
+    
+    local source_this='./kernel_platform/qcom/proprietary/prebuilt_HY11/vendorsetup.sh'
+
+    set -o pipefail
+    cd ${source_volume}
+    bash
+    # export BUILD_ID=${build_name}
+    set -x
+    echo "source ./build/envsetup.sh $(standardize_string ${user_custom_build_env})"
+    source ./build/envsetup.sh
+    echo "source ${source_this} $(standardize_string ${user_custom_build_env})"
+    echo "lunch ${lunch_target}"
+    lunch ${lunch_target} || return $?
+    source ${source_this} || return $?
+    # config ccache
+    if [[ ${ccache_enabled} == "true" ]]; then
+        aosp_config_ccache ${ccache_exec} ${ccache_dir} ${ccache_umask} ${ccache_max_size} || \
+        echo "[WARNING] Fail to enable CCACHE."
+    else
+        echo "CCACHE is disabled in pipeline configuration."
+        # TODO: to completely remove .ccache-config.sh
+        ccache_config=${HOME}/.ccache-config.sh
+        if [[ -f ${ccache_config} ]]; then
+            source $ccache_config # enables ccache
+        else
+            echo "$ccache_config not found"
+        fi
+    fi
+    echo "Running  RECOMPILE_KERNEL=1 ./kernel_platform/build/android/prepare_vendor.sh autogvm gki"
+    RECOMPILE_KERNEL=1 ./kernel_platform/build/android/prepare_vendor.sh autogvm gki || return $?
+    echo "Running bash build.sh -j$(nproc) dist --target_only "
+    bash build.sh -j$(nproc) dist --target_only || return $?
+}
+# Sync devel out dir among mutliple build bots
+# To make sure build bots has the latest out dir.
+aosp_devel_build_sync() {
+    local source_volume=${1?source_volume is required}
+    local source_volume_baseline=${2?source_volume_baseline is required}
+    local least_loaded_node=${3?least_loaded_node is required}
+    local sync_times=${4}
+    local source_volume_basename=$(basename ${source_volume})
+    local latest_build_number=$(echo ${source_volume_basename} | awk -F '-' '{ print $NF }')
+    local source_volume_out=$(dirname ${source_volume})/${source_volume_basename%%$latest_build_number}out
+    local sync_thread=2
+    local RET=0
+    local RSYNCIGNORE='^(file has vanished: |rsync warning: some files vanished before they could be transferred)'
+    set -o pipefail
+    [ ! -d ${source_volume_out} ] && btrfs subvolume create ${source_volume_out}
+
+    if [ -d ${source_volume_baseline} ]; then
+        if [[ "$(toLowerCase ${sync_times})" != "final" ]] && [[ ! -f $(dirname ${source_volume})/devel_baseline_repo_sync.done ]]; then
+            pushd ${source_volume_baseline} &>/dev/null
+            repo sync -d -q --force-sync -j${sync_thread} &>/dev/null
+            [ $? -eq 0 ] && touch $(dirname ${source_volume})/devel_baseline_repo_sync.done
+            popd &>/dev/null
+        fi
+        rsync -a --delete --ignore-errors -e ssh --exclude "mat-deploy/" \
+        ${USER}@${least_loaded_node}:${source_volume}/out/ ${source_volume_out} 2>&1 | (egrep -v "${RSYNCIGNORE}" || true)
+
+        if [[ "$(toLowerCase ${sync_times})" == "final" ]]; then
+            touch $(dirname ${source_volume})/devel_out_updating.lock
+            sudo btrfs subvolume delete ${source_volume_baseline}/out
+            btrfs subvolume snapshot ${source_volume_out} ${source_volume_baseline}/out
+            [ -f $(dirname ${source_volume})/devel_out_updating.lock ] && rm -rf $(dirname ${source_volume})/devel_out_updating.lock
+            [ -f $(dirname ${source_volume})/devel_baseline_repo_sync.done ] && rm -rf $(dirname ${source_volume})/devel_baseline_repo_sync.done
+        fi
+    fi
+    return 0
+}
+# Copying flashfiles to ULM NFS to mitigate network issues, this can be removed after network issues are fixed
+aosp_baseline_release() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local source_volume=${2?source_volume is required}
+    local release_sharedrive=${3?release_sharedrive is required}
+    local pipelineType=${4?pipelineType is required}
+    local link_name=${5?link_name is required}
+    local build_type=${6?build_type is required}
+    local repo_manifest_xml=${7?repo_manifest_xml is required}
+    local repo_manifest_release=${8?repo_manifest_release is required}
+    local repo_manifest_release_revision=${9?repo_manifest_release_revision is required}
+    local workspace=${10?workspace is required}
+    local project_release_version=${11?project_release_version is required}
+    local files_to_publish=${12?files_to_publish is required}
+    local prebuilt_release_name=${13?prebuilt_release_name is required}
+    local lunch_target=${14?lunch_target required}
+    local proguard_upload=${15}
+    local ota_publish=${16?ota_publish required}
+    local swup_publish=${17?swup_publish required}
+    local mat_deploy=${source_volume}/out/mat-deploy
+    local release_dir=${release_sharedrive}/${project_release_version}/${lunch_target}
+    local change_log_aosp=${release_sharedrive}/changelog_since_last_release.txt
+
+    product_name=$(echo ${lunch_target} | cut -d- -f1)
+    local flashimages="${project_release_version}_${product_name}_${build_type}_flashimage"
+    local targetfiles="${release_dir}/${project_release_version}_${product_name}_${build_type}_target_files.zip"
+    local cvd_host_package="${release_dir}/${project_release_version}_${product_name}_${build_type}_cvd-host_package.tar.gz"
+    local ota_package="${release_dir}/${project_release_version}_${product_name}_${build_type}_ota_package.zip"
+    local swup_package="${release_dir}/${project_release_version}_${product_name}_${build_type}_swup_package.zip"
+    local ulm_nfs="/net/deulmhustorage/flashfiles_t2k/shm/snapshots"
+    local ulm_nfs_rel_dir="${ulm_nfs}/${project_release_version}/${lunch_target}"
+
+    set -o pipefail
+
+    cd ${source_volume}
+
+    [[ ! -f ${repo_manifest_xml} ]] && repo manifest -o ${repo_manifest_xml} -r
+
+    if [[ ! "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+        # Publish binary to net sharedrive
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*snapshot.*|.*devel.* ]]; then
+
+                rm -rf "${release_dir}" && mkdir -p "${release_dir}"
+                mkdir -p "${flashimages}"
+                cp -rf ${mat_deploy}/* ${flashimages}
+                for f in eb-device-tests.zip e-tests.zip eb-general-tests.zip; do
+                  [[ -f ${flashimages}/$f ]] && mv -f ${flashimages}/$f ${release_dir}
+                done
+                # Create flashimages.zip without including wrapped folder
+                zip -rj --symlinks "${flashimages}.zip" "${flashimages}"
+                rm -rf "${flashimages}"
+                if [[ "$(toLowerCase ${pipelineType})" =~ snapshot ]]; then
+                # Copying flashimage.zip to ULM NFS to mitigate network issues, this can be removed after network issues are fixed
+                    rm -rf "${ulm_nfs_rel_dir}" && mkdir -p "${ulm_nfs_rel_dir}"
+                    pushd ${ulm_nfs_rel_dir} &>/dev/null
+                    cp -rf ${source_volume}/${flashimages}.zip ${ulm_nfs_rel_dir}
+                    ln -s "${flashimages}.zip" flashimage.zip
+                    pushd ${ulm_nfs} &>/dev/null
+                    # Delete previous snapshot folder where latest is pointing
+                    old_snapshot=$(readlink latest)
+                    if [[ ! -z ${old_snapshot} && ${old_snapshot} != ${project_release_version} ]]; then
+                        rm -rf ${old_snapshot}
+                    fi
+                    ln -sfT ${project_release_version} latest
+                    popd &>/dev/null
+                fi
+                pushd ${release_dir} &>/dev/null
+                cp -rf ${source_volume}/release_note_*.log ${release_dir} &>/dev/null || true
+                mv -f ${source_volume}/${flashimages}.zip ${release_dir}
+                ln -s "${flashimages}.zip" flashimage.zip
+                popd &>/dev/null
+                local targettmp="$(find ${source_volume}/out/target/product/*/obj/PACKAGING -maxdepth 2 -iname "*-target_files-*.zip")"
+                [[ -f ${targettmp} ]] && [[ ! -z ${targettmp} ]] && cp -rf "${targettmp}" "${targetfiles}"
+                [[ -f ${source_volume}/${repo_manifest_xml} ]] && cp -rf ${source_volume}/${repo_manifest_xml} ${release_dir}
+                local cvdtmp="$(find ${source_volume}/out -name "cvd-host_package.tar.gz" | head -1)"
+                if [[ -f "${source_volume}/${cvdtmp}" ]]; then
+                    cp -f ${source_volume}/${cvdtmp} ${cvd_host_package}
+                fi
+                # copy ota package
+                if [[ "${ota_publish}" == "true" ]]; then
+                    find ${source_volume}/out/target/product -iname "ota_pkg.zip" -exec cp -rf {} ${ota_package} \;
+                fi
+                # copy swup package
+                if [[ "${swup_publish}" == "true" ]]; then
+                    find ${source_volume}/out/target/product -iname "swup_pkg.zip" -exec cp -rf {} ${swup_package} \;
+                fi
+
+                if [[ ${files_to_publish} != "none" ]]; then
+                    for f in ${files_to_publish}; do
+                      src=$(echo $f | cut -d: -f1)
+                      dest=$(echo $f | cut -d: -f2)
+                      dest_dir=""
+                      if [[ -z ${dest} ]]; then
+                        dest=$(basename ${src})
+                      else
+                        dest_dir=$(dirname ${dest})
+                      fi
+                      # create dest dir in snapshot if not found.
+                      [[ ! -d ${release_dir}/${dest_dir} ]] && mkdir -p ${release_dir}/${dest_dir}
+                      cp ${source_volume}/${src} ${release_dir}/${dest_dir}
+                    done
+                fi
+                # Used by QNX release process later, to send feedback to integrated gerrit changes.
+                # Condition check to handle gerrit changes feedback in case of QNX build failure, to update on next successfule build
+                if [[ -f ${change_log_aosp} ]]; then
+                    cat ${source_volume}/${pipelineType}_change_numbers_since_last_build.txt >> ${change_log_aosp} || true
+                else
+                    cp ${source_volume}/${pipelineType}_change_numbers_since_last_build.txt ${change_log_aosp} || true
+
+                fi
+                cp ${source_volume}/${pipelineType}_change_numbers_since_last_build.txt ${release_dir}/ || true # This anyway copies inside the baseline directory for reference.
+                cp ${source_volume}/out/target/product/*/*_app_manifest.xml ${release_dir}/ || true # Used during document initial target snapshot to apps commit
+
+                # Publish apps metadata if found.
+                local prebuilt_app_dirs=$(ls -d vendor/*/prebuilt_module/* 2>/dev/null)
+                if [[ ! -z ${prebuilt_app_dirs} ]]; then
+                  aosp_publish_app_metadata ${verbose} ${source_volume} ${release_dir} "${prebuilt_app_dirs}" || true
+                fi
+
+                pushd ${release_sharedrive} &>/dev/null
+                ln -sfT ${project_release_version} ${link_name}
+                popd &>/dev/null
+
+            if [[ "${proguard_upload}" == "true" ]]; then
+                pushd ${source_volume}
+                # Find mapping.tar.gz files in vendor/
+                find vendor/ -name "mapping.tar.gz" | while read mapping_file
+                do
+                    # Extract the app name from the mapping file path
+                    app_name=$(echo "${mapping_file}" | awk -F/ '{print $(NF-3)}')
+                    proguard_folder="${release_sharedrive}/${project_release_version}/proguard/${app_name}"
+                    # Create the proguard directory if it doesn't exist
+                    mkdir -p "${proguard_folder}"
+                    # Copy the mapping file to the proguard directory if it exists
+                    if [ -f "${mapping_file}" ]; then
+                        cp "${mapping_file}" "${proguard_folder}"
+                        echo "Copied ${mapping_file} to ${proguard_folder}/mapping.tar.gz"
+                    else
+                        echo "${mapping_file} does not exist"
+                    fi
+                done
+                popd &>/dev/null
+            fi
+
+            if [[ "x${prebuilt_release_name}" != "xn/a" ]]; then
+                set +e
+                local img_mapping_json=$(find ${source_volume}/out/target/product -name "mapping.json")
+                if [[ -f ${img_mapping_json} ]]; then
+                    local PREBUILT_DIST=${source_volume}/CAAF_Android_Denali
+                    #Skip checking prebuilts_package [true/false] to keep it simple for now.
+                    local flashimages="$(cat ${img_mapping_json} | jq -r '.partitions[] | .image_name')"
+                    local prebuilts="$(cat ${img_mapping_json} | jq -r '.prebuilts[] | .image_name')"
+                    prebuilts="${prebuilts} ${flashimages}"
+                    local prebuilts_paths
+                    local checksum_file=${PREBUILT_DIST}/checksums.txt
+                    rm -rf "${PREBUILT_DIST}"
+                    mkdir -p "${PREBUILT_DIST}"
+                    for fl in ${prebuilts[@]}; do
+                        fl="$(standardize_string ${fl})"
+                        if [[ "${fl}" =~ .*.dtb ]] || [[ "${fl}" == "vmlinux" ]]; then
+                            prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -name ${fl} -type f -printf "%p ")"
+                        else
+                            prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -maxdepth 2 -name ${fl} -type f -printf "%p ")"
+                        fi
+                    done
+                    prebuilts_paths="$(standardize_string "${prebuilts_paths}")"
+                    for prebuilts_path in ${prebuilts_paths[@]}; do
+                        prebuilts_path="$(standardize_string ${prebuilts_path})"
+                        cp -rf "${prebuilts_path}" "${PREBUILT_DIST}"
+                        echo "$(basename ${prebuilts_path}):sha256sum:$(sha256sum ${prebuilts_path} | cut -d' ' -f1)" >> ${checksum_file}
+                    done
+
+                    pushd ${source_volume} &>/dev/null
+                    tar -cvzf prebuilts.tar.gz CAAF_Android_Denali
+                    rm -rf CAAF_Android_Denali
+                    [[ ! -d ${release_sharedrive}/${prebuilt_release_name} ]] && mkdir -p ${release_sharedrive}/${prebuilt_release_name}
+                    cp prebuilts.tar.gz ${release_sharedrive}/${prebuilt_release_name}/
+                    popd &>/dev/null
+                fi
+                set -e
+            fi
+        fi
+    fi
+}
+
+prod_update_release_info(){
+    set -x
+    local release_info=${1?release_info is required}
+    local branch=${2?branch is required}
+    local type=${3?name is required}
+    local name=${4?name is required}
+    local version=${5?version is required}
+    local release_dir=${6?release_dir is required}
+    local released_candidates_to_keep=".released_candidates_to_keep"
+
+    [[ ! -f ${release_info} ]]  && echo '{}' > ${release_info}
+    if [ -f ${release_info}_tmp ]; then
+        cat ${release_info}_tmp | jq -r ".[\"${branch}\"].${type}.${name} = \"${version}\"" >> ${release_info}_tmp_1
+        mv -f ${release_info}_tmp_1 ${release_info}_tmp
+    else
+        cat ${release_info} | jq -r ".[\"${branch}\"].${type}.${name} = \"${version}\"" > ${release_info}_tmp
+    fi
+    if [ -f ${release_info}_prev_tmp ]; then
+        local update_prev_version="$(cat ${release_info} | jq -r ".[\"${branch}\"].${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".[\"${branch}\"].${type}.${name} = \"${update_prev_version}\"" >> ${release_info}_prev_tmp_1
+        mv -f ${release_info}_prev_tmp_1 ${release_info}_prev_tmp
+    else
+        local update_prev_version="$(cat ${release_info} | jq -r ".[\"${branch}\"].${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".[\"${branch}\"].${type}.${name} = \"${update_prev_version}\"" > ${release_info}_prev_tmp
+    fi
+    if [[ ! "${type}" =~ .*nightly.* ]] && [[ ! "${name}" =~ .*build_name.* ]]; then
+        if [[ ! -f ${release_dir}/${released_candidates_to_keep} ]] || [[ "x$(grep -rx ${version} ${release_dir}/${released_candidates_to_keep})" == "x" ]]; then
+            echo "${version}" >> ${release_dir}/${released_candidates_to_keep}
+        fi
+    fi
+}

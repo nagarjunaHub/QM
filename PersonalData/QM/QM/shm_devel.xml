@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="aosp" review="https://shm-gerrit.elektrobit.com"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="caf" review="https://shm-gerrit.elektrobit.com"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="codeaurora"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="gerrit" review="https://shm-gerrit.elektrobit.com"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/qnx" name="iip"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/qnx" name="isnt"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/qnx" name="mirror"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/qnx" name="origin"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="qc-mirror"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="qc-proprietary"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/SHM/continental" name="qualcomm"/>
+  <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/" name="shm-gerrit" review="ssh://shm-gerrit.elektrobit.com:29418/"/>
+  
+  <default remote="origin"/>
+  
+  <project dest-branch="shm_t_0_master" name="SHM/AOSP-manifest-release" path=".aosp-manifest-release" remote="shm-gerrit" revision="a330d5f33bef83b444ae51d045f6abc769a04a2f" upstream="shm_t_0_master"/>
+  <project dest-branch="master" name="SHM/qnx/meta-sonarqube" path="meta-sonarqube" remote="shm-gerrit" revision="fa43751bc2f1734c9914a7c56b48ea11acfc5726" upstream="master"/>
+  <project dest-branch="shm_0wk_0" name="SHM/qnx/meta-sw-shm" path="meta-sw-shm" remote="shm-gerrit" revision="24346b8aaa48146cbebe9196e94ff15a6ea97cc5" upstream="shm_0wk_0">
+    <copyfile dest="meta-qualcomm/meta-android-guest/classes/deploy_dir_android.bbclass" src="classes/deploy_dir_android_shm.bbclass"/>
+    <copyfile dest="meta-qualcomm/meta-qnx/conf/machine/include/qnx7arm64.inc" src="conf/machine/include/qnx7arm64.inc"/>
+    <copyfile dest="meta-distro-common/conf/mirrors/europe.conf" src="conf/europe.conf"/>
+    <copyfile dest="meta-distro-common/conf/premirror/qnx7shm-hmi.conf" src="conf/qnx7shm-hmi.conf"/>
+    <copyfile dest="meta-distro-common/conf/premirror/qnx7shm-ux.conf" src="conf/qnx7shm-ux.conf"/>
+  </project>
+  <project groups="qnx,linux,android,integration" name="build-scripts" revision="9802fcdc2ad571e07a72e787253423adfe286337" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-asset-integration" revision="86109e8c814eb83755990aa4759ac93b2c6f19a7" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-distro-common" revision="8b2d71ef694b650fa546cc08616167c936003da9" upstream="denali-4.1-int"/>
+  <project groups="qnx" name="meta-gplv2" remote="mirror" revision="d2f8b5cdb285b72a4ed93450f6703ca27aa42e8a" upstream="kirkstone"/>
+  <project groups="qnx,linux" name="meta-java" remote="mirror" revision="87dd00a5b17ab020ee3415556a17c4451092c7fd" upstream="kirkstone"/>
+  <project groups="qnx" name="meta-openembedded" remote="mirror" revision="278ec081a64e6a7679d6def550101158126cd935" upstream="kirkstone"/>
+  <project groups="qnx" name="meta-python2" remote="mirror" revision="f02882e2aa9279ca7becca8d0cedbffe88b5a253" upstream="kirkstone"/>
+  <project groups="qnx,linux" name="meta-qualcomm" revision="cf41cfae0322a903171db7281ba963b218f9fc4c" upstream="denali-4.1-es3.1"/>
+  <project groups="qnx,linux" name="meta-services-system" revision="7912a24ba7a8842f68c841344344e391291f0592" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-services-ui" revision="ce83d80609dc21d2f15c670c33f9200040f3df17" upstream="denali-4.1-int"/>
+  <project groups="qnx" name="poky" remote="mirror" revision="65dafea22018052fe7b2e17e6e4d7eb754224d38" upstream="kirkstone"/>
+  <project groups="qnx" name="qnx_sdp" remote="iip" revision="5517b00e8c608c052dfd61be8cf66d1df821c70c" upstream="snapdragon-auto-hqx-4-5-5-0-r00003.1"/>
+</manifest>

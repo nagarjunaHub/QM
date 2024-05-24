@@ -1,0 +1,435 @@
+#!/bin/bash
+# Remove trailing whitespace/linefeed/newline of the string.
+standardize_string() {
+    echo "$(echo "${1}" | sed -e 's/^[[:space:]]*//' | sed -e 's/[[:space:]]*$//' | tr -d '\n' | tr -d '\r')"
+}
+
+# Remove all character except . / \ 0-9 a-z A-Z _ -
+super_standardize_string() {
+    # Follow variable name rule
+    echo "$(echo "${1}" | sed 's/[^./\0-9a-zA-Z_-]*//g')"
+}
+
+toLowerCase() {
+    echo "$(echo "${1}" | tr '[:upper:]' '[:lower:]')"
+}
+
+toUpperCase() {
+    echo "$(echo "${1}" | tr '[:lower:]' '[:upper:]')"
+}
+
+# Check if a folder is btrfs subvolume
+is_btrfs_subvolume() {
+    local dir=${1?dir is required}
+    [ "$(stat -f --format="%T" "${dir}")" == "btrfs" ] || return
+
+    inode="$(stat --format="%i" "${dir}")"
+    case "$inode" in
+        2|256)
+            echo "true"
+            return;;
+        *)
+            return;;
+    esac
+}
+
+### GERRIT HELPER FUNCTIONS ###
+# Get latest commit on the tip of remote branch.
+
+get_change_number_from_commit_sha () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} \
+        --format=json --current-patch-set | jq -r '.number' | jq -r 'select (.!=null)')
+
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_latest_remote_commit (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_project=${2?gerrit_project is required}
+    local gerrit_branch=${3?gerrit_branch is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query --format=JSON status:merged project:${gerrit_project} branch:${gerrit_branch} \
+        --current-patch-set limit:1 | jq -r '.currentPatchSet | .revision') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_latest_remote_commit (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_project=${2?gerrit_project is required}
+    local gerrit_branch=${3?gerrit_branch is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query --format=JSON status:merged project:${gerrit_project} branch:${gerrit_branch} \
+        --current-patch-set limit:1 | jq -r '.currentPatchSet | .revision') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_parent_commit_id (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} \
+        --format=json --current-patch-set | jq -r '.currentPatchSet | .parents' | jq -r 'select (.!=null) | .[]')
+
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_parent_commit_number_with_patchset_number (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local patchset_number=""
+
+    local query=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} \
+        --format=json --dependencies --current-patch-set)
+
+    local number="$(echo $query | jq -r '.dependsOn' | jq -r 'select (.!=null) | .[]' | jq -r '.number')"
+    if [[ ${number} != "" ]]; then
+      local current_patchset="$(echo $query | jq -r '.dependsOn' | jq -r 'select (.!=null) | .[]' | jq -r '.isCurrentPatchSet')"
+      local ref=$(echo $query | jq -r '.dependsOn' | jq -r 'select (.!=null) | .[]' | jq -r '.ref')
+      local patchset_number="$(basename ${ref})"
+      echo "${number},${patchset_number},${current_patchset}"
+    else
+      echo ""
+    fi
+}
+
+get_parent_commit_number (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} \
+        --format=json --dependencies --current-patch-set | jq -r '.dependsOn' | jq -r 'select (.!=null) | .[]' | jq -r '.number')
+
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_commit_status_from_change_number () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.status') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_commit_id_from_change_number () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.currentPatchSet | .revision') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_branch_from_change_number (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json | jq -r '.branch') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_current_patchset_from_change_number () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.currentPatchSet | .number') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_current_ref_from_change_number () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.currentPatchSet | .ref') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_project_from_change_number (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.project') | cut -d' ' -f1)
+    echo "$(super_standardize_string "${query}")"
+}
+
+get_reviewers_email_from_change_number () {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --all-reviewers | \
+        jq -r '.allReviewers' | jq -jr 'select (.!=null) | .[]' | jq -r '.email | select(.!=null)' | tr '\n' ',' | tr -d ' '))
+    echo "$(standardize_string "${query}")"
+}
+
+get_previous_commit_from_remote() {
+    local commits_from_last=${1?commits_from_last is required}
+    local gerrit_host=${2?gerrit_host is required}
+    local gerrit_project=${3?gerrit_project is required}
+    remote_commits=$(git archive --remote=ssh://${gerrit_host}:29418/${gerrit_project} ${commits_from_last} manifest.xml | tar -xO)
+    local previous_revision=$(grep 'path="app"' <<< "${remote_commits}" | sed -n 's/.*revision="\([^"]*\)".*/\1/p')
+    echo "${previous_revision}"
+}
+
+# Check whether commit is on latest of remote branch.
+# Give a warn if use wants to bebase commit.
+is_commit_rebasable (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local gerrit_project=${3?gerrit_project is required}
+    local gerrit_branch=${4?gerrit_branch is required}
+    local parent_commit_id=$(get_parent_commit_id ${gerrit_host} ${gerrit_change_number})
+
+    if [[ ! "${parent_commit_id}" == "$(get_latest_remote_commit ${gerrit_host} ${gerrit_project} ${gerrit_branch})" ]]; then
+        echo "TRUE"
+    else
+        echo ""
+    fi
+}
+
+# Check if commit is open with limitation is 100 commits in same gerrit project.
+is_commit_open (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_project=${2?gerrit_project is required}
+    local gerrit_branch=${3?gerrit_branch is required}
+    local gerrit_commit_id=${4?gerrit_commit_id is required}
+    local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query --format=JSON status:open project:${gerrit_project} \
+    branch:${gerrit_branch} --current-patch-set limit:100) | grep -oh "${gerrit_commit_id}")
+    echo "$(super_standardize_string "${query}")"
+}
+
+# Check if given change number is open or not.
+is_change_number_open() {
+  local gerrit_host=${1?gerrit_host is required}
+  local gerrit_change_number=${2?gerrit_change_number is required}
+  local query=$(ssh -p 29418 ${gerrit_host} gerrit query change:${gerrit_change_number} \
+      --format=json --current-patch-set | jq -r 'select (.!=null)' | jq -r '.status | select(.!=null)')
+
+  echo "$(super_standardize_string "${query}")"
+}
+
+# Decode gerrit event's msg from gerrit.
+get_gerrit_event_msg(){
+    local encoded_msg=${1?encoded_msg is required}
+    local decoded_msg="$(standardize_string "$(echo ${encoded_msg} | base64 --decode | tail -1)")"
+    decoded_msg="$(echo "${decoded_msg}" | awk '{print $NF}')"
+    echo "$(toLowerCase ${decoded_msg})"
+}
+
+# get the BUILD_ON_NODE value from comment text, if found
+get_gerrit_build_on_node_from_event_msg(){
+  local encoded_msg=${1?encoded_msg is required}
+  local decoded_msg="$(standardize_string "$(echo ${encoded_msg} | base64 --decode | tail -1)")"
+  local node="_na_"
+  for w in $(echo "${decoded_msg}"); do
+    if [[ ${w} =~ BUILD_ON_NODE ]]; then
+      node=$(echo ${w} | cut -d= -f2)
+    fi
+  done
+  echo "$(toLowerCase ${node})"
+}
+
+#get commit basedon topic name
+get_commits_from_topic(){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_query=${2?gerrit_query is required}
+    TMPFILE1="./tempfile1"
+    TMPFILE2="./tempfile2"
+    ssh -p 29418 ${gerrit_host} gerrit query --current-patch-set "$gerrit_query" |grep "project:" | awk '{print $2}' > $TMPFILE1
+    ssh -p 29418 ${gerrit_host} gerrit query --current-patch-set "$gerrit_query" |grep refs/changes |cut -d "/" -f 4- > $TMPFILE2
+    local query=$(paste -d " " $TMPFILE1 $TMPFILE2)
+    rm -rf $TMPFILE1 $TMPFILE2
+    echo "${query}"
+}
+
+# is it a merge commit? They have 2 parents.
+is_merge_commit() {
+  local gerrit_host=${1?gerrit_host is required}
+  local gerrit_change_number=${2?gerrit_change_number is required}
+  local parents_count=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | jq -r '.currentPatchSet | .parents' | jq -r 'select (.!=null) | length')
+  if [[ ${parents_count} -ge 2 ]]; then
+    echo "TRUE"
+  fi
+}
+
+
+# This function collects all changes the given change dependson, recursively.
+# i.e
+# If the input is https://skilfish-gerrit.ebgroup.elektrobit.com/c/aosp/device/elektrobit/skilfish_car/+/577, then
+# then the response will be 577, 428 - because 577 depends on 428.
+# Open the change in gerrit if this explanation doesn't make sense.
+get_relation_chain() {
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+
+    local parent_commit=""
+    local parent_commit_status=""
+    local parent_commit_and_patchset_number=""
+
+    local relation_chain="${gerrit_change_number},$(get_current_patchset_from_change_number ${gerrit_host} ${gerrit_change_number}),true"
+
+    while :; do
+      parent_commit_and_patchset_number=$(get_parent_commit_number_with_patchset_number ${gerrit_host} ${gerrit_change_number})
+      gerrit_change_number=$(echo ${parent_commit_and_patchset_number} | cut -d, -f1)
+      [[ ${gerrit_change_number} == "" ]] && break
+      parent_commit_status=$(get_commit_status_from_change_number ${gerrit_host} ${gerrit_change_number})
+
+      [[ ${parent_commit_and_patchset_number} == "" ]] && break
+      [[ $parent_commit_status != "NEW" ]] && break
+
+      # PAY ATTENTION TO THE ORDER HERE. IT IS IMPORTANT THAT THE SCRIPT PUTS THE BOTTOM MOST DEPENDENCY FIRST, AND THE UPPER MOST DEPENDENCY AT THE TOP
+      # THIS ORDER IS LATER USED BY repo download; so we want to make sure the top most change is downloaded at the very end.
+      # Otherwise we're not verifying all the changes.
+      # This is also used by bundle-verify promotion job.
+      relation_chain="${parent_commit_and_patchset_number} ${relation_chain}"
+    done
+
+    echo "${relation_chain}"
+}
+
+### END OF GERRIT HELPER FUNCTIONS ###
+
+bundle_promote() {
+  local gerrit_host=${1?gerrit_host is required}
+  local dry_run=${2?dry_run required yes/no}
+  local gerrit_changelist=${3?gerrit_changelist is required}
+  local ready2_submit=$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )/libtools/pipeline/gerrit_check_change_ready2submit_bundle.py
+
+  local c=""
+  local change_number=""
+  local patchset_number=""
+  local errors=""
+  local error_msg=""
+  local rebase_needed=""
+
+  gerrit_changelist=$(echo ${gerrit_changelist} | sed 's/#/ /g')
+  for c in "$gerrit_changelist"; do
+    change_number=$(echo $c | cut -d, -f1)
+    patchset_number=$(echo $c | cut -d, -f2)
+
+    echo python3 ${ready2_submit} --gerrit_host ${gerrit_host} -c ${change_number} -p ${patchset_number}
+    error_msg=$(python3 ${ready2_submit} --gerrit_host ${gerrit_host} -c ${change_number} -p ${patchset_number})
+    if [ $? != 0 ]; then
+      errors=true;
+      echo !!! $change_number $error_msg
+    fi
+
+    if [[ ${errors} == "true" ]]; then
+      echo One or more changes do not have code review, hence, they are not ready for submission.
+      exit 10;
+    fi
+
+    # set changes to verified:
+    echo "---- add verified +1 to below changes ---- "
+    for c in ${gerrit_changelist}; do
+      change_number=$(echo $c | cut -d, -f1)
+      patchset_number=$(echo $c | cut -d, -f2)
+
+      echo ssh -p 29418 ${gerrit_host} gerrit review --verified +1 ${change_number},${patchset_number}
+      [[ ${dry_run} != "no" ]] && ssh -p 29418 ${gerrit_host} gerrit review --verified +1 ${change_number},${patchset_number}
+    done
+
+    # accept changes
+    echo "---- submit below changes ---- "
+    for c in ${gerrit_changelist}; do
+      change_number=$(echo $c | cut -d, -f1)
+      patchset_number=$(echo $c | cut -d, -f2)
+      echo ssh -p 29418 ${gerrit_host} gerrit review --submit ${change_number},${patchset_number}
+      [[ ${dry_run} != "no" ]] && ssh -p 29418 ${gerrit_host} gerrit review --submit ${change_number},${patchset_number}
+    done
+
+  done
+}
+
+# To clone only one branch in quite mode.
+_git_clone_lite(){
+    local branch=${1?branch is required}
+    local project=${2?project is required}
+    local folder=${3}
+    git clone --quiet --single-branch --branch ${branch} ${project} ${folder} &>/dev/null
+}
+
+# Function supports to send email with plain text or hmtl
+# multiple recipients, CC addresses, reply-to addresses, and attachments.
+eb_mail(){
+    ###############################################################################
+    ## Examples:
+    ## eb_mail -s/--subject "This is a test message" \
+    ##         -m/--mime "text/html" \
+    ##         -f/--from "sender@abc.com" \
+    ##         -t/--to "recip1@abc.com,recip2@abc.com" \
+    ##         -c/--cc "cc1@abc.com,cc2@abc.com" \
+    ##         -b/--body "content here"
+    ##         -a/--attachments "file1 file2"
+    ###############################################################################
+
+    options=$(getopt -l "subject:,body:,from:,to:,cc:,mime:,attachments:," -o "s:b:f:t:c:m:a" -a -- "$@")
+    eval set -- "${options}"
+
+    while true; do
+        case $1 in
+        -s|--subject)
+            shift
+            subject="${1}"
+            ;;
+        -b|--body)
+            shift
+            body="${1}"
+            ;;
+        -f|--from)
+            shift
+            from="${1?from is required}"
+            ;;
+        -t|--to)
+            shift
+            to="${1}"
+            ;;
+        -c|--cc)
+            shift
+            cc="${1}"
+            ;;
+        -m|--mime)
+            shift
+            mime="${1:-text/plain}"
+            ;;
+        -a|--attachments)
+            shift
+            attachments="${1}"
+            ;;
+        --)
+            shift
+            break;;
+        *)
+            echo "Wrong input";
+            return 1;;
+        esac
+    shift
+    done
+
+    boundary="eb1sendmail2lib3"
+    message="From: ${from}\nTo: ${to}"
+    [[ "x${cc}" != "x" ]] && message="${message}\nCc: ${cc}"
+    message="${message}\nSubject: ${subject}"
+    message="${message}\nMIME-Version: 1.0"
+    message="${message}\nContent-Type: multipart/mixed; boundary=${boundary}"
+    message="${message}\n--${boundary}"
+    message="${message}\nContent-Disposition: inline"
+    message="${message}\nContent-Type: ${mime}; charset=\"us-ascii\""
+    message="${message}\n\n${body}"
+    # Add attachments, if any.
+    for at in ${attachments}; do
+        fn=$(basename ${at})
+        message="${message}\n--${boundary}"
+        message="${message}\nContent-Transfer-Encoding: base64"
+        message="${message}\nContent-Type: application/octet-stream; name=${fn}"
+        message="${message}\n\n$(base64 ${at})"
+    done
+    message="${message}\n--$boundary--"
+    printf "${message}" | sendmail -t
+}
+
+# this function will fetch the latest created folder from given repo and path from artifactory
+get_latest_version_from_artifactory() {
+    set -x
+    local USERPASS=${1?USERPASS is required}
+    local url=${2?url is required}
+    local repo=${3?artifactory repo is required}
+    local path=${4?artifactory path is required}
+
+    version=$(curl -u "$USERPASS" -X POST -k $url/api/search/aql -H "content-type: text/plain" -d "items.find({\"type\":\"folder\",\"repo\":{\"\$eq\":\"$repo\"},\"path\":{\"\$eq\":\"$path\"}}).sort({\"\$desc\" : [\"created\"]}).limit(1)"| jq -r '.results[] | .name')
+    echo "${version}"
+}
+

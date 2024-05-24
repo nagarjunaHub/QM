@@ -1,0 +1,1132 @@
+#!/bin/bash
+source $( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )/common.lib
+# Rule: target id has to be same as manifest name.
+# To check if commit is being supported in the manifest.
+# First will check if user specify the target id (in case some target id not being used, but manifest still in the repo)
+# Else try to get all manifest available.
+
+get_project_targetids(){
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local release_manifest_project="${2?release_manifest_project is required}"
+    local release_manifest_branch="${3?release_manifest_branch is required}"
+    local gerrit_project="${4?gerrit_project is required}"
+    local gerrit_branch="${5?gerrit branch is required}"
+    local supported_target_ids="${6}"
+    local targetids=""
+    rm -rf .tmpclonecheck
+    _git_clone_lite ${release_manifest_branch} ${release_manifest_project} .tmpclonecheck
+
+    # If user doesn't specify the target id list, then try to get from manifests.
+    if [[ "x${supported_target_ids}" == "x" ]]; then
+        files=$(echo $(ls .tmpclonecheck/) | tr '\r\n' ' ')
+        IFS=' ' read -r -a supported_target_id_list <<< "${files}"
+        supported_target_id_list=${supported_target_id_list[@]/.xml/}
+    else
+        # Convert from string into list.
+        IFS=' ' read -r -a supported_target_id_list <<< "${supported_target_ids}"
+    fi
+
+    for target_id in ${supported_target_id_list[@]}; do
+        if [[ "${release_manifest_project}" =~ .*${gerrit_project}.* ]] || [[ "x$(grep -rn ${gerrit_project} .tmpclonecheck/${target_id}*.xml | grep ${gerrit_branch})" != "x" ]]; then
+            targetids="${target_id} ${targetids[@]}"
+        fi
+    done
+    rm -rf .tmpclonecheck/
+
+    targetids=$(standardize_string "${targetids}")
+    echo "${targetids}"
+}
+
+# Checked merged commit has been already covered in previous devel build.
+# If yes, then skip the build
+is_devel_rev_built(){
+    local release_manifest_project="${1?release_manifest_project is required}"
+    local release_manifest_branch="${2?release_manifest_branch is required}"
+    local gerrit_host="${3?gerrit_host is required}"
+    local gerrit_project="${4?gerrit_project is required}"
+    local gerrit_revision="${5?gerrit_revision is required}"
+    local gerrit_branch="${6?gerrit_branch is required}"
+    rm -rf .tmpclonecheck/
+
+    if [[ ! "${gerrit_project}" =~ .*aosp-manifest.* ]]; then
+        _git_clone_lite ${release_manifest_branch} ${release_manifest_project} .tmpclonecheck/
+
+        if [[ "x$(grep -rn ${gerrit_project} .tmpclonecheck/*.xml | grep ${gerrit_branch})" != "x" ]]; then
+            local latest_commit="$(grep -rn ${gerrit_project} .tmpclonecheck/*.xml | awk '{print $(NF-1)}' | cut -d"=" -f2)"
+            latest_commit="$(super_standardize_string ${latest_commit})"
+
+            local is_devel_rev_built_ws=/ssd/jenkins/is_devel_rev_built_workspaces/${gerrit_project}
+            if [[ ! -d ${is_devel_rev_built_ws} ]]; then
+              _git_clone_lite ${gerrit_branch} ssh://${gerrit_host}:29418/${gerrit_project} ${is_devel_rev_built_ws}
+              [[ $? != 0 ]] &&  rm -rf ${is_devel_rev_built_ws} && exit 1
+            fi
+
+            pushd ${is_devel_rev_built_ws} &>/dev/null
+            git fetch $(git remote) ${gerrit_branch}
+            git reset --hard ${latest_commit} &>/dev/null
+            local check_return="$(git log --oneline --no-abbrev-commit | grep -oh ${gerrit_revision})"
+            popd &>/dev/null
+
+            echo "$(super_standardize_string ${check_return})"
+        fi
+        rm -rf .tmpclonecheck/
+    fi
+}
+
+# Check if there is new devel release compared to previous release.
+# If no, then skip snapshot build.
+is_devel_released(){
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local release_manifest_project="${2?release_manifest_project is required}"
+    local release_manifest_dev_branch="${3?release_manifest_dev_branch is required}"
+    local release_manifest_rel_branch="${4?release_manifest_rel_branch is required}"
+    rm -rf .tmpclonecheck*
+
+    _git_clone_lite ${release_manifest_dev_branch} ${release_manifest_project} .tmpclonecheckdev/
+    _git_clone_lite ${release_manifest_rel_branch} ${release_manifest_project} .tmpclonecheckrel/
+
+    echo "$(super_standardize_string $(diff .tmpclonecheckdev/*.xml .tmpclonecheckrel/*.xml))"
+    rm -rf .tmpclonecheck*
+}
+
+# Read through StackTarget_overview.txt to get list of supported build bots
+get_build_nodes(){
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local stacktarget=${2?stacktarget is required}
+    local stacktarget_file=${3?stacktarget file name required}
+    local botsusage="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/${stacktarget_file}"
+    local nodes=""
+    while IFS= read -r LINE; do
+        if [[ "${LINE}" =~ .*${stacktarget}.* ]]; then
+            nodes="$(echo ${LINE} | cut -d' ' -f1) ${nodes[@]}"
+        fi
+    done < ${botsusage}
+    nodes=$(standardize_string "${nodes}")
+    echo "${nodes}"
+}
+
+# Verify will use subvolume from devel baseline.
+# Devel and snapshot have their own baseline.
+# This function to pre-check if build bot has that baseline folder
+# To decide verify/devel/snapshot should build on which buid bot.
+get_source_baseline_name (){
+    local project_branch=${1?worker_type is required}
+    local pipelineType=${2?pipelineType is required}
+    local source_volume=${3?source_volume is required} #current workspace
+
+    #current baseline with build output for verify job (incremental build), is symbolic link to stable source_volume
+    local source_volume_baseline=""
+    local source_volume_parentdir="$(dirname ${source_volume})"
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+        source_volume_baseline=${source_volume_parentdir}/${project_branch}_devel_src_AOSP-baseline
+    else
+        local source_volume_basename=$(basename ${source_volume})
+        local latest_build_number=$(echo ${source_volume_basename} | awk -F '-' '{ print $NF }')
+        source_volume_baseline=${source_volume_parentdir}/${source_volume_basename%%$latest_build_number}baseline
+    fi
+    source_volume_baseline="$(standardize_string "${source_volume_baseline}")"
+    echo ${source_volume_baseline}
+}
+
+
+# For verify commit 2 types to download
+# Cherry pick and checkout
+# If commit alone then just use cherrypick.
+# If commit has parent's unmerged, or submit together commit, or a merge-commit then use checkout
+get_download_type (){
+    local gerrit_host=${1?gerrit_host is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local gerrit_project=${3?gerrit_project is required}
+    local gerrit_branch=$(get_branch_from_change_number ${gerrit_host} ${gerrit_change_number})
+    local gerrit_commit_id=$(get_commit_id_from_change_number ${gerrit_host} ${gerrit_change_number})
+    local parent_commit_id=$(get_parent_commit_id ${gerrit_host} ${gerrit_change_number})
+    if [[ "$(is_commit_open ${gerrit_host} ${gerrit_project} ${gerrit_branch} ${parent_commit_id})" ]] \
+        || [[ ! "$(is_commit_open ${gerrit_host} ${gerrit_project} ${gerrit_branch} ${gerrit_commit_id})" ]] \
+        || [[ "$(is_merge_commit ${gerrit_host} ${gerrit_commit_id}))" == "TRUE" ]]; then
+        echo ""
+    else
+        echo "--cherry-pick"
+    fi
+}
+
+
+# Check if a valid jira ticket included in commit message.
+is_jira_ticket (){
+    local gerrit_change_commit_message=${1?gerrit_change_commit_message is required}
+    local found_tickets=""
+    for jiracheck in $(echo "${gerrit_change_commit_message}" | base64 --decode | sed -e "s/[,;]/ /g"); do # replace all [,;] to space
+        jiracheck=$(super_standardize_string ${jiracheck})
+        if [[ ${jiracheck} =~ ^[a-zA-Z].*-.*[0-9]$ ]]; then
+            [[ ! ${found_tickets} =~ .*${jiracheck}.* ]] && found_tickets="${found_tickets} ${jiracheck}"
+        fi
+    done
+    echo "$(standardize_string "${found_tickets}")"
+}
+
+# Regex base on commit message to check if this commit has any dependency. (Depends-On:)
+# Then will send list of dependency to fetch along with a commit.
+get_dependencies (){
+    local verbose=${1?verbose value required. Should be true or false}
+    local gerrit_change_commit_message=${2?gerrit_change_commit_message is required}
+    local gerrit_host=${3?gerrit_host is required}
+
+    [[ $verbose == "true" ]] && set -x
+
+    gerrit_change_commit_message=$(echo "${gerrit_change_commit_message}" | base64 --decode | sed -e "s/[,;]/ /g")
+    local found_dependencies=""
+    for dp in $(echo "${gerrit_change_commit_message}" | grep -Eo "[dD]epend[s]-[oO]n[:].*"); do
+        [[ ! ${dp} =~ [dD]epend[s]-[oO]n[:] ]] && found_dependencies="${found_dependencies} ${dp}"
+    done
+
+    local dependencies_with_patchset_number=""
+    for dp in $(echo "$(standardize_string "${found_dependencies}")" | tr ' ' '\n' | sort -n | tr '\n' ' '); do
+      [[ "$(standardize_string ${dp})" == "" ]] && continue
+      dependencies_with_patchset_number="${dependencies_with_patchset_number} $(get_relation_chain ${gerrit_host} ${dp})"
+    done
+    echo "$(standardize_string "${dependencies_with_patchset_number}")"
+}
+
+# Cleaning out dir for incremental build
+aosp_incremental_clean(){
+    local source_volume=${1?source_volume is required}
+    rm -f ${source_volume}/out/target/product/*/*.zip
+    rm -f ${source_volume}/out/target/product/*/system/build.prop
+    rm -f ${source_volume}/out/target/product/*/installed-files.txt
+    rm -rf ${source_volume}/out/target/product/*/obj/PACKAGING
+    rm -rf ${source_volume}/out/dist
+}
+
+# Wait until devel sync completes.
+aosp_wait_for_devel_update() {
+    local source_volume=${1?source_volume is required}
+    while [ -f $(dirname ${source_volume})/devel_out_updating.lock ]; do
+        sleep 1
+    done
+}
+
+# To prepare, publish, clean btrfs workspace.
+aosp_ws_worker(){
+    local verbose=${1?verbose value required. Should be true or false}
+    local worker_type=${2?worker_type is required:prepare/publish/clean}
+    local pipelineType=${3?pipelineType is required}
+    local source_volume=${4?source_volume is required} #current workspace
+    local source_volume_baseline=${5?source_volume is required} #current baseline with build output for verify job (incremental build), is symbolic link to stable source_volume
+    local retain_workspace=${6?retain_workspace required}
+    [[ $verbose == "true" ]] && set -x
+
+    local source_volume_parentdir="$(dirname ${source_volume})"
+    [ ! -d "${source_volume_parentdir}" ] && mkdir -p ${source_volume_parentdir}
+    if [[ "$(toLowerCase ${worker_type})" == "prepare" ]]; then
+        # Check if there's sufficient space to accomodate one out/ directory.
+        # Even though we delete one out dir before we start a devel or snapshot,
+        # expecting the available space for one *more* out/ dir can prevent sporadic failures.
+        if [[ ! "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+
+          if [[ -d ${source_volume_baseline}/out ]]; then
+            out_dir_size=$(du -sk ${source_volume_baseline}/out | cut -f1)
+            available_space=$(df -k $source_volume_baseline | tail -1 | awk '{print $4}')
+            if [[ $available_space -lt $out_dir_size ]]; then
+              echo "Available space is ${available_space} less than the size of an out dir: ${out_dir_size}"
+              echo "There are chances that a full build may not pass."
+              echo "Please clean up something first, and then start the ${pipelineType} build again."
+              exit 1
+            fi
+          fi
+        fi
+
+
+        if [ -d "${source_volume}" ]; then
+            rm -rf ${source_volume}/out || sudo btrfs subvolume delete ${source_volume}/out
+            sudo btrfs subvolume delete ${source_volume}
+        fi
+
+        [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]] && aosp_wait_for_devel_update ${source_volume}
+        if [ -d "${source_volume_baseline}" ]; then
+            btrfs subvolume snapshot $(readlink -f ${source_volume_baseline}) ${source_volume}
+
+            if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+                rm -rf ${source_volume}/out || sudo btrfs subvolume delete ${source_volume}/out
+                if [[ ! "$(toLowerCase ${pipelineType})" =~ .*clean.* ]]; then
+                    btrfs subvolume snapshot $(readlink -f ${source_volume_baseline})/out ${source_volume}/out
+                fi
+            fi
+        else
+            btrfs subvolume create ${source_volume}
+        fi
+
+        if [[ ! "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+            [[ "$(toLowerCase ${pipelineType})" =~ .*devel.* ]] && rm -rf $(dirname ${source_volume})/devel_out_updating.lock
+            rm -rf ${source_volume}/out || sudo btrfs subvolume delete ${source_volume}/out
+            btrfs subvolume create ${source_volume}/out
+            #btrfs subvolume snapshot $(readlink -f ${source_volume}/../*-out) ${source_volume}/out
+
+            #echo disable deleting out dir temporarily.
+        else
+            # incremental cleanup tasks
+            # as the stack version will differ, files containing the version have to be removed
+            aosp_incremental_clean "${source_volume}"
+            # END incremental cleanup tasks
+        fi
+    elif [[ "$(toLowerCase ${worker_type})" == "publish" ]]; then
+        if [[ ! "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+            [[ "x${source_volume}" == "x" ]] || [[ "x${source_volume_baseline}" == "x" ]] && return 404
+            if [[ "$(toLowerCase ${pipelineType})" =~ .*devel.* ]]; then
+                # Devel build doesn't need these artifacts, so better clean
+                aosp_incremental_clean "${source_volume}"
+            fi
+            if [ -L ${source_volume_baseline} ] || [ ! -d ${source_volume_baseline} ]; then
+                pushd ${source_volume_parentdir}
+                ln -sfT $(basename ${source_volume}) $(basename ${source_volume_baseline})
+                popd &>/dev/null
+            else
+                return 444
+            fi
+        fi
+    elif [[ "$(toLowerCase ${worker_type})" == "clean" ]]; then
+        # delete the @tmp dirs generated by pipeline
+        rm -rf ${source_volume}@tmp
+
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+          if [[ ${retain_workspace} != "true" ]]; then
+            sudo btrfs subvolume delete ${source_volume}/out || rm -rf ${source_volume}/out
+            sudo btrfs subvolume delete ${source_volume}
+          else
+            echo "Retain workspace requested. Not deleting verify workspace."
+          fi
+        else
+            source_volume_base_name=$(basename ${source_volume})
+            source_latest_build_number=$(echo $source_volume_base_name | awk -F '-' '{ print $NF }')
+            # snapshot name is without the MAX NUMMBER suffix (ie. "A0_out_master-baseline-")
+            source_volume_without_build_number=${source_volume_base_name%%$source_latest_build_number}
+
+            #  create sorted list of matching snapshots directories
+            source_volume_list=$(find $(dirname $source_volume) -maxdepth 1 -type d -name "${source_volume_without_build_number}*" -printf "%f\n" | sort)
+            # sudo btrfs subvolume list /ssd | awk '{ print $7 }' |grep $SOURCE_SNAPSHOT_NAME | sort
+            source_volume_has_symlink_list=$(find $(dirname $source_volume) -maxdepth 1 -ignore_readdir_race -type l -name "${source_volume_without_build_number}*" -printf "%l\n")
+
+            for sv in $source_volume_list; do
+                if [[ ! "${sv}" =~ .*-out.* ]]; then # Exclude out sync folder
+                    if [ $(echo ${sv} | awk -F '-' '{ print $NF }') -le ${source_latest_build_number} ]; then
+                        if [[ ! ${source_volume_has_symlink_list} =~ ${sv} ]]; then
+                            sudo btrfs subvolume delete $(dirname ${source_volume})/${sv}/out || rm -rf $(dirname ${source_volume})/${sv}/out
+                            if ! sudo btrfs subvolume delete $(dirname ${source_volume})/${sv}; then
+                                echo "WARNING: ${sv} could not be deleted"
+                            fi
+                        fi
+                    fi
+                fi
+            done
+        fi
+    elif [[ "$(toLowerCase ${worker_type})" == "cleanself" ]]; then
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+          if [[ ${retain_workspace} != "true" ]]; then
+            sudo btrfs subvolume delete ${source_volume}/out || rm -rf ${source_volume}/out
+            sudo btrfs subvolume delete ${source_volume}
+          else
+            echo "Retain workspace requested. Not deleting verify workspace."
+          fi
+        fi
+    else
+        return 400
+    fi
+}
+
+aosp_ws_reposync() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local pipelineType=${2?pipelineType is required}
+    local source_volume=${3?source_volume is required}
+    local repo_manifest_url=${4?repo_manifest_url is required}
+    local repo_manifest_revision=${5?repo_manifest_revision is required}
+    local repo_manifest_xml=${6?repo_manifest_xml is required}
+    local fresh_repo_workspace=${7?fresh_repo_workspace is required}
+    local sync_thread=2
+    pushd ${source_volume} &>/dev/null
+
+    echo "repo init -u ${repo_manifest_url} -b ${repo_manifest_revision} -m ${repo_manifest_xml}"
+    repo init -u ${repo_manifest_url} -b ${repo_manifest_revision} -m ${repo_manifest_xml}
+    # This does NOT delete the .repo/ directory. It only deletes the other directories from workspace root, except out/
+    if [[ ${fresh_repo_workspace} == "true" ]]; then
+      ls | grep -vw out | xargs rm -rf
+    fi
+
+    echo "repo forall -c \"git reset --hard\""
+    repo forall -c "git reset --hard" || true
+    echo "repo sync -d -q --force-sync -j${sync_thread}"
+    repo sync -d -q --force-sync -j${sync_thread}
+
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+        local gerrit_host=${8?gerrit_host is required}
+        local gerrit_project=${9?gerrit_project is required}
+        local gerrit_change_number=${10?gerrit_change_number is required}
+        local gerrit_patchset_number=${11?gerrit_patchset_number is required}
+        local dependencies=${12}
+        local download_type=$(get_download_type ${gerrit_host} ${gerrit_change_number} ${gerrit_project})
+        set -x
+        for dep in ${dependencies[@]}; do
+            local dp=$(echo ${dep} | cut -d, -f1)
+            local patchset_number=$(echo ${dep} | cut -d, -f2)
+            dp_project=$(get_project_from_change_number ${gerrit_host} ${dp})
+            if [[ "$(toLowerCase "${dp_project}")" =~ .*aosp-manifest.* ]]; then
+                repo init -u ssh://${gerrit_host}:29418/${dp_project} -b "$(get_branch_from_change_number ${gerrit_host} ${dp})" -m ${repo_manifest_xml}
+                pushd ${source_volume}/.repo/manifests &>/dev/null
+                git fetch ssh://${gerrit_host}:29418/${dp_project} "$(get_current_ref_from_change_number ${gerrit_host} ${dp})" && git cherry-pick FETCH_HEAD
+                popd &>/dev/null
+
+                # This does NOT delete the .repo/ directory. It only deletes the other directories from workspace root, except out/
+                if [[ ${fresh_repo_workspace} == "true" ]]; then
+                  ls | grep -vw out | xargs rm -rf
+                fi
+
+                echo "repo sync -d -q --force-sync -j${sync_thread}"
+                repo sync -d -q --force-sync -j${sync_thread}
+            fi
+        done
+
+        if [[ "$(toLowerCase "${gerrit_project}")" =~ .*aosp-manifest.* ]]; then
+            repo init -u ssh://${gerrit_host}:29418/${gerrit_project} -b "$(get_branch_from_change_number ${gerrit_host} ${gerrit_change_number})" -m ${repo_manifest_xml}
+            pushd ${source_volume}/.repo/manifests &>/dev/null
+            git fetch ssh://${gerrit_host}:29418/${gerrit_project} "$(get_current_ref_from_change_number ${gerrit_host} ${gerrit_change_number})" && git cherry-pick FETCH_HEAD
+            popd &>/dev/null
+
+            # This does NOT delete the .repo/ directory. It only deletes the other directories from workspace root, except out/
+            if [[ ${fresh_repo_workspace} == "true" ]]; then
+              ls | grep -vw out | xargs rm -rf
+            fi
+            echo "repo sync -d -q --force-sync -j${sync_thread}"
+            repo sync -d -q --force-sync -j${sync_thread}
+        fi
+
+        for dep in ${dependencies[@]}; do
+            local dp=$(echo ${dep} | cut -d, -f1)
+            local patchset_number=$(echo ${dep} | cut -d, -f2)
+            dp_project=$(get_project_from_change_number ${gerrit_host} ${dp})
+            if [[ ! "$(toLowerCase "${dp_project}")" =~ .*aosp-manifest.* ]]; then
+                repo download ${download_type} "${dp_project}" "${dp}/${patchset_number}"
+            fi
+        done
+
+        if [[ ! "$(toLowerCase "${gerrit_project}")" =~ .*aosp-manifest.* ]]; then
+            repo download ${download_type} "${gerrit_project}" \
+            "${gerrit_change_number}/${gerrit_patchset_number}"
+        fi
+        set +x
+    fi
+    popd &>/dev/null
+
+}
+
+aosp_create_flash_image(){
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    set +e
+    local source_volume=${2?source_volume is required}
+
+    local img_mapping_json=$(find ${source_volume}/out/target/product -name "mapping.json")
+    if [ -f ${img_mapping_json} ]; then
+        local ESO_DIST=${source_volume}/out/mat-deploy
+        local flashimages="$(cat ${img_mapping_json} | jq -r '.partitions[] | .image_name')"
+        flashimages="${flashimages}"
+        local flashimage_paths
+        local checksum_file=${ESO_DIST}/checksums.txt
+        rm -rf "${ESO_DIST}"
+        mkdir -p "${ESO_DIST}"
+        for fl in ${flashimages[@]}; do
+            fl="$(standardize_string ${fl})"
+            if [[ "${fl}" =~ .*.dtb ]]; then
+                flashimage_paths="${flashimage_paths} $(find ${source_volume}/out/target/product -name ${fl} -type f -printf "%p ")"
+                continue
+            fi
+            if [[ "${fl}" =~ build.prop ]]; then
+                flashimage_paths="${flashimage_paths} $(find ${source_volume}/out/target/product/*/system -maxdepth 1 -name ${fl} -type f -printf "%p ")"
+                continue
+            fi
+            flashimage_paths="${flashimage_paths} $(find ${source_volume}/out/target/product -maxdepth 2 -name ${fl} -type f -printf "%p ")"
+        done
+        flashimage_paths="$(standardize_string "${flashimage_paths}")"
+        cp -rf "${img_mapping_json}" "${ESO_DIST}"
+        for flashimage_path in ${flashimage_paths[@]}; do
+            flashimage_path="$(standardize_string ${flashimage_path})"
+            cp -rf "${flashimage_path}" "${ESO_DIST}"
+            echo "$(basename ${flashimage_path}):sha256sum:$(sha256sum ${flashimage_path} | cut -d' ' -f1)" >> ${checksum_file}
+        done
+
+        for f in eb-device-tests.zip e-tests.zip eb-general-tests.zip; do
+          [ -f ${source_volume}/out/target/product/*/$f ] && cp ${source_volume}/out/target/product/*/$f ${ESO_DIST}/
+        done
+        [ -f ${source_volume}/out/host/linux-x86/cvd-host_package.tar.gz ] && cp ${source_volume}/out/host/linux-x86/cvd-host_package.tar.gz ${ESO_DIST}/
+    fi
+    set -e
+}
+
+aosp_sonar_build() {
+  local verbose=${1?verbose value required. Should be true or false}
+  [[ $verbose == "true" ]] && set -x
+
+  local source_volume=${2?source_volume is required}
+  local lunch_target=${3?lunch_target is required}
+  local sonar_server=${4?sonar_server is required}
+  local sonar_scanner=${5?sonar_scanner is required}
+  local sonar_build_wrapper=${6?sonar_build_wrapper is required}
+  local sonar_project_prefix=${7?sonar_project_prefix is required}
+  local jacoco_build_target=${8?jacoco build target is required}
+  local sonar_modules=${9?sonar module list required}
+
+  cd $source_volume
+
+  bash device/*/*/sonarqube/sonar-scanner-wrapper.sh ${verbose} ${source_volume} \
+	${lunch_target} ${sonar_server} ${sonar_scanner} ${sonar_build_wrapper} \
+  ${sonar_project_prefix} ${jacoco_build_target} "${sonar_modules}"
+}
+
+
+aosp_build() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local source_volume=${2?source_volume is required}
+    local lunch_target=${3?lunch_target is required}
+    local make_target=${4?make_target is required}
+    local user_custom_build_env=${5}
+    set -o pipefail
+    cd ${source_volume}
+    set -x
+    echo "source build/envsetup.sh $(standardize_string ${user_custom_build_env})"
+    set +x
+    source build/envsetup.sh $(standardize_string ${user_custom_build_env}) || return $?
+    set -x
+    echo "lunch ${lunch_target}"
+    set +x
+    lunch ${lunch_target} || return $?
+    set -x
+
+    ccache_config=/home/jenkins/.ccache-config.sh
+    if [ -f $ccache_config ]; then
+        source $ccache_config # enables ccache
+    else
+        echo $ccache_config not found
+    fi
+    # Instruct Ninja not to run parallel jobs when cpu load=nproc
+    export NINJA_EXTRA_ARGS="-l$(nproc)"
+
+    env > build_env.txt
+
+    unset BUILD_NUMBER # Prevent jenkins env variable from interfering with that of aosp.
+
+    local kernel_header_helper_target="out/target/product/$(echo ${lunch_target} | cut -d '-' -f1)/obj/KERNEL_OBJ/usr"
+    if [[ ! -f ${kernel_header_helper_target} && ${lunch_target} =~ denali ]]; then
+      echo "make -j$(nproc) ${kernel_header_helper_target}"
+      make -j$(nproc) ${kernel_header_helper_target}
+    fi
+
+    if [[ ${make_target} =~ "installclean" ]]; then
+      # This should be run separately because it prevents any other target from being built.
+      make installclean
+      # Remove installclean from kake_target variable.
+      # Otherwise, only this target will be built, and no other targets.
+      make_target=${make_target/installclean/}
+    fi
+
+    if [[ ${make_target} =~ "clean" ]]; then
+      # This should be run separately because it prevents any other target from being built.
+      make clean
+      # Remove clean from kake_target variable.
+      # Otherwise, only this target will be built, and no other targets.
+      make_target=${make_target/clean/}
+    fi
+
+    echo "make -j$(nproc) ${make_target}"
+    make -j$(nproc) ${make_target} || return $?
+    set +x
+}
+
+# Mainly for __get_flash__ feature on jenkins.
+# To determine package name for user in early stage.
+aosp_get_flash_version() {
+    local gerrit_project=${1?gerrit_project is required}
+    local gerrit_change_number=${2?gerrit_change_number is required}
+    local gerrit_patchset_number=${3?gerrit_patchset_number is required}
+    echo "$(basename ${gerrit_project})_${gerrit_change_number}_${gerrit_patchset_number}"
+}
+
+# Publish get_flash image to user on net share.
+aosp_get_flash_release() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local source_volume=${2?source_volume is required}
+    local release_sharedrive=${3?release_sharedrive is required}
+    local build_type=${4?build_type is required}
+    local target_id=${5?target_id is required}
+    local get_flash_version=${6?get_flash_version is required}
+    local mat_deploy=${source_volume}/out/mat-deploy
+    local release_dir=${release_sharedrive}/${get_flash_version}
+    local flashimages="${get_flash_version}_${build_type}_flashimage"
+
+    cd ${source_volume}
+    rm -rf ${source_volume}/${target_id}.xml
+    repo manifest -o ${target_id}.xml -r
+
+    rm -rf "${release_dir}" && mkdir -p "${release_dir}"
+    pushd ${release_dir} &>/dev/null
+    mkdir -p "${flashimages}"
+    cp -f ${mat_deploy}/* ${flashimages}
+    for f in eb-device-tests.zip e-tests.zip eb-general-tests.zip; do
+      [ -f ${flashimages}/$f ] && mv -f ${flashimages}/$f ${release_dir}
+    done
+
+    zip -r --symlinks "${flashimages}.zip" "${flashimages}"
+    rm -rf "${flashimages}"
+    popd &>/dev/null
+    [ -f ${source_volume}/${target_id}.xml ] && cp -rf ${source_volume}/${target_id}.xml ${release_dir}
+
+    set +e
+    set -x
+    local img_mapping_json=$(find ${source_volume}/out/target/product -name "mapping.json")
+    if [ -f ${img_mapping_json} ]; then
+        local PREBUILT_DIST=${release_dir}/CAAF_Android_Denali
+        #Skip checking prebuilts_package [true/false] to keep it simple for now.
+        local flashimages="$(cat ${img_mapping_json} | jq -r '.partitions[] | .image_name')"
+        local prebuilts="$(cat ${img_mapping_json} | jq -r '.prebuilts[] | .image_name')"
+        prebuilts="${prebuilts} ${flashimages}"
+        local prebuilts_paths
+        local checksum_file=${PREBUILT_DIST}/checksums.txt
+        rm -rf "${PREBUILT_DIST}"
+        mkdir -p "${PREBUILT_DIST}"
+        for fl in ${prebuilts[@]}; do
+            fl="$(standardize_string ${fl})"
+            if [[ "${fl}" =~ .*.dtb ]] || [[ "${fl}" == "vmlinux" ]]; then
+                prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -name ${fl} -type f -printf "%p ")"
+            else
+                prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -maxdepth 2 -name ${fl} -type f -printf "%p ")"
+            fi
+        done
+        prebuilts_paths="$(standardize_string "${prebuilts_paths}")"
+        for prebuilts_path in ${prebuilts_paths[@]}; do
+            prebuilts_path="$(standardize_string ${prebuilts_path})"
+            cp -rf "${prebuilts_path}" "${PREBUILT_DIST}"
+            echo "$(basename ${prebuilts_path}):sha256sum:$(sha256sum ${prebuilts_path} | cut -d' ' -f1)" >> ${checksum_file}
+        done
+
+        pushd ${release_dir}/ &>/dev/null
+        tar -cvzf prebuilts.tar.gz CAAF_Android_Denali
+        rm -rf CAAF_Android_Denali
+        popd &>/dev/null
+    fi
+    set -e
+    set +x
+}
+
+# Sync devel out dir among mutliple build bots
+# To make sure build bots has the latest out dir.
+aosp_devel_build_sync() {
+    local source_volume=${1?source_volume is required}
+    local source_volume_baseline=${2?source_volume_baseline is required}
+    local least_loaded_node=${3?least_loaded_node is required}
+    local sync_times=${4}
+    local source_volume_basename=$(basename ${source_volume})
+    local latest_build_number=$(echo ${source_volume_basename} | awk -F '-' '{ print $NF }')
+    local source_volume_out=$(dirname ${source_volume})/${source_volume_basename%%$latest_build_number}out
+    local sync_thread=2
+    local RET=0
+    local RSYNCIGNORE='^(file has vanished: |rsync warning: some files vanished before they could be transferred)'
+    set -o pipefail
+    [ ! -d ${source_volume_out} ] && btrfs subvolume create ${source_volume_out}
+
+    if [ -d ${source_volume_baseline} ]; then
+        if [[ "$(toLowerCase ${sync_times})" != "final" ]] && [[ ! -f $(dirname ${source_volume})/devel_baseline_repo_sync.done ]]; then
+            pushd ${source_volume_baseline} &>/dev/null
+            repo sync -d -q --force-sync -j${sync_thread} &>/dev/null
+            [ $? -eq 0 ] && touch $(dirname ${source_volume})/devel_baseline_repo_sync.done
+            popd &>/dev/null
+        fi
+        rsync -a --delete --ignore-errors -e ssh --exclude "mat-deploy/" \
+        jenkins@${least_loaded_node}:${source_volume}/out/ ${source_volume_out} 2>&1 | (egrep -v "${RSYNCIGNORE}" || true)
+
+        if [[ "$(toLowerCase ${sync_times})" == "final" ]]; then
+            touch $(dirname ${source_volume})/devel_out_updating.lock
+            sudo btrfs subvolume delete ${source_volume_baseline}/out
+            btrfs subvolume snapshot ${source_volume_out} ${source_volume_baseline}/out
+            [ -f $(dirname ${source_volume})/devel_out_updating.lock ] && rm -rf $(dirname ${source_volume})/devel_out_updating.lock
+            [ -f $(dirname ${source_volume})/devel_baseline_repo_sync.done ] && rm -rf $(dirname ${source_volume})/devel_baseline_repo_sync.done
+        fi
+    fi
+    return 0
+}
+
+# Publish app manifest to NFS
+aosp_publish_app_metadata() {
+    set +e
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local source_volume=${2?source_volume is required}
+    local release_dir=${3?release_dir is required}
+    local prebuilt_app_dirs=${4?prebuilt_app_dirs path required}
+
+    local app_release_dir=${release_dir}/apps/
+
+    pushd ${source_volume}
+    for prebuilt_app_dir in ${prebuilt_app_dirs}; do
+      for app_manifest in $(ls ${prebuilt_app_dir}/manifest.xml 2>/dev/null); do
+        local app_name=$(basename $(dirname ${app_manifest}))
+        [[ ! -d ${app_release_dir}/${app_name} ]] && mkdir -p ${app_release_dir}/${app_name}/
+        cp ${app_manifest} ${app_release_dir}/${app_name}/
+      done
+    done
+    set -e
+}
+
+# Release baseline with images and manifest.
+aosp_baseline_release() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local source_volume=${2?source_volume is required}
+    local release_sharedrive=${3?release_sharedrive is required}
+    local pipelineType=${4?pipelineType is required}
+    local link_name=${5?link_name is required}
+    local build_type=${6?build_type is required}
+    local target_id=${7?target_id is required}
+    local repo_manifest_release=${8?repo_manifest_release is required}
+    local repo_manifest_release_revision=${9?repo_manifest_release_revision is required}
+    local workspace=${10?workspace is required}
+    local project_release_version=${11?project_release_version is required}
+    local files_to_publish=${12?files_to_publish is required}
+    local prebuilt_release_name=${13?prebuilt_release_name is required}
+    local lunch_target=${14?lunch_target required}
+    local mat_deploy=${source_volume}/out/mat-deploy
+    local release_dir=${release_sharedrive}/${project_release_version}
+
+    product_name=$(echo ${lunch_target} | cut -d- -f1)
+    local flashimages="${project_release_version}_${product_name}_${build_type}_flashimage"
+    local targetfiles="${release_dir}/${project_release_version}_${product_name}_${build_type}_target_files.zip"
+    local cvd_host_package="${release_dir}/${project_release_version}_${product_name}_${build_type}_cvd-host_package.tar.gz"
+
+    set -o pipefail
+
+    cd ${source_volume}
+
+    [ ! -f ${target_id}.xml ] && repo manifest -o ${target_id}.xml -r
+
+    if [[ ! "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+        rm -rf ${source_volume}/.repo/release_manifests && git clone ${repo_manifest_release} ${source_volume}/.repo/release_manifests
+        pushd ${source_volume}/.repo/release_manifests &>/dev/null
+        git checkout ${repo_manifest_release_revision} &>/dev/null
+        cp -rf ${source_volume}/${target_id}.xml ${source_volume}/.repo/release_manifests
+        if [[ "x$(git diff)" != "x" ]]; then
+            # Publish manifest to gerrit
+            git add ${target_id}.xml
+            git commit -m "Jenkins ${pipelineType} release: ${project_release_version} ${target_id} ${build_type}"
+            local diff_found="true"
+        fi
+        popd &>/dev/null
+
+        # Publish binary to net sharedrive
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*snapshot.*|.*devel.* ]]; then
+
+                rm -rf "${release_dir}" && mkdir -p "${release_dir}"
+                pushd ${release_dir} &>/dev/null
+                cp -rf ${source_volume}/release_note_*.log ${release_dir} &>/dev/null || true
+                mkdir -p "${flashimages}"
+                cp -f ${mat_deploy}/* ${flashimages}
+                for f in eb-device-tests.zip e-tests.zip eb-general-tests.zip; do
+                  [ -f ${flashimages}/$f ] && mv -f ${flashimages}/$f ${release_dir}
+                done
+                zip -r --symlinks "${flashimages}.zip" "${flashimages}"
+                ln -s "${flashimages}.zip" flashimage.zip
+                rm -rf "${flashimages}"
+                popd &>/dev/null
+                local targettmp="$(find ${source_volume}/out/target/product/*/obj/PACKAGING -maxdepth 2 -iname "*-target_files-*.zip")"
+                [ -f ${targettmp} ] && [ ! -z ${targettmp} ] && cp -rf "${targettmp}" "${targetfiles}"
+                [ -f ${source_volume}/${target_id}.xml ] && cp -rf ${source_volume}/${target_id}.xml ${release_dir}
+                [ -f ${source_volume}/out/host/linux-x86/cvd-host_package.tar.gz ] && cp ${source_volume}/out/host/linux-x86/cvd-host_package.tar.gz ${cvd_host_package}
+
+                if [[ ${files_to_publish} != "none" ]]; then
+                    for f in ${files_to_publish}; do
+                      src=$(echo $f | cut -d: -f1)
+                      dest=$(echo $f | cut -d: -f2)
+                      dest_dir=""
+                      if [[ -z ${dest} ]]; then
+                        dest=$(basename ${src})
+                      else
+                        dest_dir=$(dirname ${dest})
+                      fi
+                      # create dest dir in snapshot if not found.
+                      [[ ! -d ${release_dir}/${dest_dir} ]] && mkdir -p ${release_dir}/${dest_dir}
+                      cp ${source_volume}/${src} ${release_dir}/${dest_dir}
+                    done
+                fi
+                cp ${source_volume}/${pipelineType}_change_numbers_since_last_build.txt ${release_dir}/ || true # Used by QNX release process later, to send feedback to integrated gerrit changes.
+                cp ${source_volume}/out/target/product/*/*_app_manifest.xml ${release_dir}/ || true # Used during document initial target snapshot to apps commit
+
+                # Publish apps metadata if found.
+                local prebuilt_app_dirs=$(ls -d vendor/*/prebuilt_module/* 2>/dev/null)
+                if [[ ! -z ${prebuilt_app_dirs} ]]; then
+                  aosp_publish_app_metadata ${verbose} ${source_volume} ${release_dir} "${prebuilt_app_dirs}" || true
+                fi
+
+                pushd "$(dirname ${release_dir})" &>/dev/null
+                ln -sfT "$(basename ${release_dir})" ${link_name}
+                popd &>/dev/null
+
+
+            if [[ "x${prebuilt_release_name}" != "xn/a" ]]; then
+                set +e
+                local img_mapping_json=$(find ${source_volume}/out/target/product -name "mapping.json")
+                if [ -f ${img_mapping_json} ]; then
+                    local PREBUILT_DIST=${source_volume}/CAAF_Android_Denali
+                    #Skip checking prebuilts_package [true/false] to keep it simple for now.
+                    local flashimages="$(cat ${img_mapping_json} | jq -r '.partitions[] | .image_name')"
+                    local prebuilts="$(cat ${img_mapping_json} | jq -r '.prebuilts[] | .image_name')"
+                    prebuilts="${prebuilts} ${flashimages}"
+                    local prebuilts_paths
+                    local checksum_file=${PREBUILT_DIST}/checksums.txt
+                    rm -rf "${PREBUILT_DIST}"
+                    mkdir -p "${PREBUILT_DIST}"
+                    for fl in ${prebuilts[@]}; do
+                        fl="$(standardize_string ${fl})"
+                        if [[ "${fl}" =~ .*.dtb ]] || [[ "${fl}" == "vmlinux" ]]; then
+                            prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -name ${fl} -type f -printf "%p ")"
+                        else
+                            prebuilts_paths="${prebuilts_paths} $(find ${source_volume}/out/target/product -maxdepth 2 -name ${fl} -type f -printf "%p ")"
+                        fi
+                    done
+                    prebuilts_paths="$(standardize_string "${prebuilts_paths}")"
+                    for prebuilts_path in ${prebuilts_paths[@]}; do
+                        prebuilts_path="$(standardize_string ${prebuilts_path})"
+                        cp -rf "${prebuilts_path}" "${PREBUILT_DIST}"
+                        echo "$(basename ${prebuilts_path}):sha256sum:$(sha256sum ${prebuilts_path} | cut -d' ' -f1)" >> ${checksum_file}
+                    done
+
+                    pushd ${source_volume} &>/dev/null
+                    tar -cvzf prebuilts.tar.gz CAAF_Android_Denali
+                    rm -rf CAAF_Android_Denali
+                    [ ! -d ${release_sharedrive}/${prebuilt_release_name} ] && mkdir -p ${release_sharedrive}/${prebuilt_release_name}
+                    cp prebuilts.tar.gz ${release_sharedrive}/${prebuilt_release_name}/
+                    popd &>/dev/null
+                fi
+                set -e
+            fi
+        fi
+
+
+        pushd ${source_volume}/.repo/release_manifests &>/dev/null
+        # This block sitting outside "git diff" block, and is run always because when "FORCE_RUN" is enabled, manifest won't change. But snapshot is published to NFS.
+        # Without a commit/tag in AOSP-manfiest-release, publishing is essentially complete. Also, publishing a tag should be the last step.
+
+        if [[ ${diff_found} == "true" ]]; then
+          git checkout ${repo_manifest_release_revision}
+          # Commit the apps metadata as well
+          if [[ -d ${release_dir}/apps ]]; then
+            rm -rf apps
+            git add .
+            cp -av ${release_dir}/apps .
+            git add .
+            git commit --amend --no-edit
+          fi
+        fi
+
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*snapshot.* ]]; then
+          git tag ${project_release_version}
+          local tags="--tags"
+        fi
+
+        git push ${tags} $(git remote) HEAD:refs/heads/${repo_manifest_release_revision}
+
+        popd &>/dev/null
+    fi
+}
+
+has_repo_changed_since_last_build() {
+  [[ $verbose == "true" ]] && set -x
+  local verbose=${1?verbose should be true or false}
+  local source_volume=${2?Path to aosp workspace required}
+  local manifest=${3?path to last build manifest required}
+  local repos=${4?list of repositories to check required}
+
+  pushd ${source_volume} &>/dev/null
+  repo list -f > repolist.txt
+
+  for r in ${repos}; do
+    path=$(grep ${r} ${source_volume}/repolist.txt | cut -d: -f1)
+    if [[ ! -z ${path} ]]; then
+      cd ${path}
+      cur_rev=$(git rev-parse HEAD)
+      if [[ x"$(grep ${r} ${manifest} | grep ${cur_rev})" = "x" ]]; then
+        changed_repos="${changed_repos} ${r}"
+      else
+        unchanged_repos="${unchanged_repos} ${r}"
+      fi
+    else
+      invalid_repos="${invalid_repos} ${r}"
+    fi
+  done
+
+  [[ ! -z ${invalid_repos} ]] && echo "Invalid repos: ${invalid_repos}" && exit 1
+  echo "${changed_repos}"
+}
+
+# Release app which is included in aosp
+app_release() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local source_volume=${2?source_volume is required}
+    local release_sharedrive=${3?release_sharedrive is required}
+    local pipelineType=${4?pipelineType is required}
+    local project_release_version=${5?project_release_version is required}
+    local app_files_to_publish=${6?app_files_to_publish is required}
+    local release_dir=${release_sharedrive}/${project_release_version}
+    set -o pipefail
+
+    pushd ${source_volume} &>/dev/null
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*snapshot.* ]]; then
+        if [ ! -d ${release_dir} ]; then
+          mkdir -p ${release_dir}
+        fi
+
+        if [[ ${app_files_to_publish} != "none" ]]; then
+            included_apps=${app_files_to_publish}
+        else
+            t2k_prebuilt_apks_path=$(find device/ -type f -name t2k_prebuilt_apks.mk)
+            included_apps=$(grep -o "PRODUCT_PACKAGES += .*" ${t2k_prebuilt_apks_path} | sed 's/PRODUCT_PACKAGES += //g')
+        fi
+        for app in ${included_apps}; do
+            if [[ ${app_files_to_publish} != "none" ]]; then
+                app_path=$(find . -name ${app} -type f)
+            else
+                app_path=$(prebuilts/build-tools/linux-x86/bin/ninja -f out/combined-*.ninja -t query out/target/product/*/obj/APPS/${app}_intermediates/package.apk | grep "${app}-.*.apk$")
+                app=$(basename ${app_path})
+            fi
+            if [ "x${app_path}" != "x" ]; then
+                set -e
+                pushd $(dirname ${app_path}) &>/dev/null
+                project=$(basename $PWD)
+                sha=$(git rev-parse HEAD)
+                version=$(cat version.txt)
+
+                if [ ${project} == "HMI" ]; then
+                    folder_name="IVI_${version}"
+                else
+                    folder_name="${project}_${version}"
+                fi
+                app_folder=${release_dir}/${folder_name}
+                if [ ! -d ${app_folder} ]; then
+                    # create app specific folder if folder is not there.
+                    mkdir -p ${app_folder}
+                fi
+                #copy debug & release both apks to app_folder
+                cp ${app} ${app_folder}
+                #create info.txt file with app version and git project sha revision information
+                echo "IVI_VERSION: ${version}" > ${app_folder}/info.txt
+                echo "COMMIT SHA: ${sha}" >> ${app_folder}/info.txt
+                cd ${release_dir}
+                zip -j ${folder_name}.zip ${folder_name}/*
+                rm -rf ${folder_name}
+                popd &>/dev/null
+                set +e
+            else
+                echo "application path has not been found for app: ${app} in combined-*.ninja file"
+            fi
+        done
+        #create latest link
+        pushd $(dirname ${release_dir}) &>/dev/null
+        ln -sfT ${project_release_version} latest
+        popd &>/dev/null
+    fi
+}
+
+notify_integration_completion_in_gerrit() {
+  local verbose=${1?verbose value required. Should be true or false}
+  [[ $verbose == "true" ]] && set -x
+
+  local source_volume=${2?source_volume required}
+  local build_name=${3?build_name required}
+  local target_id=${4?target_id required}
+  local gerrit_host=${5?gerrit host required}
+  local pipeline_type=${6?pipeline_type required}
+  local repo_manifest_release=${7?repo_manifest_release required}
+  local repo_manifest_release_revision=${8?repo_manifest_release_revision is required}
+  local net_sharedrive=${9?net_sharedrive is required}
+
+  local this_manifest=".repo/manifests/notify_this_build.xml"
+  local last_build=".repo/manifests/notify_last_build.xml"
+
+  pushd ${source_volume} &>/dev/null
+  repo manifest -r -o ${this_manifest}
+
+  rm -rf ${source_volume}/.manifest_release
+  git clone -b ${repo_manifest_release_revision} ${repo_manifest_release} ${source_volume}/.manifest_release
+
+  ln -sfT ${source_volume}/.manifest_release/${target_id}.xml ${source_volume}/${last_build}
+  commits_since_last_snapshot=$(repo diffmanifests --raw --pretty-format="%H" $(basename ${last_build}) $(basename ${this_manifest}) | grep "^ A" | awk '{print $NF}')
+  repo diffmanifests --raw --pretty-format="%H" $(basename ${last_build}) $(basename ${this_manifest}) > ${source_volume}/repo_diffmanifests.txt
+  echo > ${source_volume}/${pipeline_type}_change_numbers_since_last_build.txt # Used by QNX release process later, to send feedback to integrated gerrit changes.
+  for commit in ${commits_since_last_snapshot}; do
+     change_number=$(get_change_number_from_commit_sha ${gerrit_host} $commit)
+     if [[ -z $change_number ]]; then
+         commit_info=$(cat ${source_volume}/repo_diffmanifests.txt | grep ${commit})
+         project_path=$(echo $commit_info | awk '{print $2}')
+         if [[ "${project_path}" =~ .*/prebuilt.* ]]; then
+           previous_prebuilt_commit=$(echo $commit_info | awk '{print $3}')
+           change_number_file="${source_volume}/${pipeline_type}_change_numbers_since_last_build.txt"
+           notify_integration_completion_in_gerrit_for_app_change ${verbose} ${net_sharedrive} ${project_path} ${previous_prebuilt_commit} ${gerrit_host} ${change_number_file} ${pipeline_type} ${build_name} ${source_volume}
+         else
+           echo "WARNING: Could not get change number for commit-sha $commit Probably this was a commit pushed to HEAD directly."
+         fi
+         continue
+     fi
+     if [[ $(echo "$change_number" | wc -l) -gt 1 ]]; then
+         # there's more than result when searching for commit-sha because of cherry-picks/reverts.
+         # We have to find the right change number for the given commit-sha.
+         # To do that unfortunately there's no better way than querying gerrit again for each change number
+         # and matching the resulting commit-sha with the commit sha we are looping with.
+         for c in $(echo "$change_number"); do
+                 commit_sha=$(get_commit_id_from_change_number ${gerrit_host} $c)
+                 if [[ $commit_sha == $commit ]]; then
+                         change_number=$c
+                         break
+                 fi
+         done
+
+     fi
+     patchset_number=$(get_current_patchset_from_change_number ${gerrit_host} $change_number)
+
+     gerrit_msg="Change integrated into AOSP ${pipeline_type} build: ${build_name}"
+     gerrit_msg="${gerrit_msg} - Path: ${net_sharedrive}/${build_name}"
+
+     echo "ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m "$gerrit_msg""
+     ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m \'$gerrit_msg\'
+     echo "${change_number},${patchset_number}" >> ${source_volume}/${pipeline_type}_change_numbers_since_last_build.txt
+
+  done
+  rm -fr ${this_manifest} ${last_build} ${source_volume}/.manifest_release
+
+}
+
+notify_integration_completion_in_gerrit_for_app_change() {
+  local verbose=${1?verbose value required. Should be true or false}
+  [[ $verbose == "true" ]] && set -x
+
+  local net_sharedrive=${2?net_sharedrive is required}
+  local project_path=${3?project_path is required}
+  local previous_prebuilt_commit=${4?previous_prebuilt_commit is required}
+  local gerrit_host=${5?gerrit_host is required}
+  local change_number_file=${6?change_number_file is required}
+  local pipeline_type=${7?pipeline_type is required}
+  local build_name=${8?build_name is required}
+  local source_volume=${9?source_volume is required}
+
+  pushd ${source_volume} &>/dev/null
+  app_repo_name=$(cat ${project_path}/manifest.xml | grep 'path="app"' | grep -o -P '(?<=name=").*?(?=" )')
+  app_repo_branch=$(cat ${project_path}/manifest.xml | grep 'path="app"' | grep -o -P '(?<=upstream=").*?(?=")')
+  app_repo_basename=$(basename ${app_repo_name})
+
+  current_app_source_revision=$(cat ${project_path}/manifest.xml | grep 'path="app"' | grep -o -P '(?<=revision=").*?(?=" )')
+  prebuilt_ssh_url=$(cd ${project_path} && git remote -v | awk '{print $2}' | head -1)
+  prev_build=$(ls -r1t ${net_sharedrive}/ | grep -w latest -B 1 | head -1)
+
+  if [[ "x${prev_build}" != "x" && -d ${net_sharedrive}/${prev_build} && -f ${net_sharedrive}/${prev_build}/${app_repo_basename}_app_manifest.xml ]]; then
+    previous_app_source_revision=$(cat ${net_sharedrive}/${prev_build}/${app_repo_basename}_app_manifest.xml | grep 'path="app"' | grep -o -P '(?<=revision=").*?(?=" )')
+  else
+    rm -rf /tmp/prebuilt
+    mkdir /tmp/prebuilt && cd /tmp/prebuilt
+    git init 2>&1
+    git remote add origin ${prebuilt_ssh_url} 2>&1
+    git fetch origin --depth 1 ${previous_prebuilt_commit} 2>&1
+    git checkout ${previous_prebuilt_commit} 2>&1
+    previous_app_source_revision=$(cat manifest.xml | grep 'path="app"' | grep -o -P '(?<=revision=").*?(?=" )')
+  fi
+  cd /tmp && rm -rf app
+  git clone ssh://${gerrit_host}:29418/${app_repo_name} -b ${app_repo_branch} app
+  app_commits_since_last_snapshot=$(cd app && git rev-list --ancestry-path ${previous_app_source_revision}..${current_app_source_revision})
+  for commit in ${app_commits_since_last_snapshot}; do
+    change_number=$(get_change_number_from_commit_sha ${gerrit_host} ${commit})
+    if [[ -z ${change_number} ]]; then
+      echo "WARNING: Could not get change number for commit-sha ${commit} Probably this was a commit pushed to HEAD directly."
+    else
+      if [[ $(echo "${change_number}" | wc -l) -ge 1 ]] && [[ ! $(grep ${change_number} ${change_number_file}) ]]; then
+        # there's more than result when searching for commit-sha because of cherry-picks/reverts.
+        # We have to find the right change number for the given commit-sha.
+        # To do that unfortunately there's no better way than querying gerrit again for each change number
+        # and matching the resulting commit-sha with the commit sha we are looping with.
+        echo "send gerrit message to app commit-sha: ${commit}, change_number: ${change_number}"
+        for c in $(echo "${change_number}"); do
+          commit_sha=$(get_commit_id_from_change_number ${gerrit_host} ${c})
+          if [[ ${commit_sha} == ${commit} ]]; then
+            change_number=${c}
+            break
+          fi
+        done
+
+        patchset_number=$(get_current_patchset_from_change_number ${gerrit_host} ${change_number})
+
+        gerrit_msg="Change integrated into AOSP ${pipeline_type} build: ${build_name}"
+
+        echo "ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m "$gerrit_msg""
+        ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m \'$gerrit_msg\'
+        echo "${change_number},${patchset_number}" >> ${change_number_file}
+      fi
+    fi
+  done
+}
+
+# Default config:
+# Production build delete after y days, only keep build found in .released_candidates_to_keep
+# Development test build will be kept for x days.
+prod_release_clean_up() {
+    local dir=${1?dir is required}
+    local days_to_keep=${2?days_to_keep is required}
+    local released_candidates_to_keep=".released_candidates_to_keep"
+    set -x
+    for it in $(find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep}); do
+      echo "Update timestamp for $it based on latest modified file"
+      find "$it" -type d -execdir \
+         touch --reference="$(find "$it" -mindepth 1 -maxdepth 1 -printf '%T+=%p\n' \
+                                  | sort | tail -n 1 | cut -d= -f2-)" "$it" \;
+    done
+    if [ -f ${dir}/${released_candidates_to_keep} ]; then
+        for it in $(find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep}); do
+            if [[ "x$(grep -rx "$(basename ${it})" ${dir}/${released_candidates_to_keep})" == "x" ]]; then
+                rm -rf ${it}
+            fi
+        done
+    else
+        find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep} -exec rm -rf {} \;
+    fi
+    set +x
+}
+
+prod_update_release_info(){
+    local release_info=${1?release_info is required}
+    local branch=${2?branch is required}
+    local type=${3?name is required}
+    local name=${4?name is required}
+    local version=${5?version is required}
+    local release_dir=${6?release_dir is required}
+    local released_candidates_to_keep=".released_candidates_to_keep"
+    if [ -f ${release_info}_tmp ]; then
+        cat ${release_info}_tmp | jq -r ".${branch}.${type}.${name} = \"${version}\"" >> ${release_info}_tmp_1
+        mv -f ${release_info}_tmp_1 ${release_info}_tmp
+    else
+        cat ${release_info} | jq -r ".${branch}.${type}.${name} = \"${version}\"" > ${release_info}_tmp
+    fi
+    if [ -f ${release_info}_prev_tmp ]; then
+        local update_prev_version="$(cat ${release_info} | jq -r ".${branch}.${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".${branch}.${type}.${name} = \"${update_prev_version}\"" >> ${release_info}_prev_tmp_1
+        mv -f ${release_info}_prev_tmp_1 ${release_info}_prev_tmp
+    else
+        local update_prev_version="$(cat ${release_info} | jq -r ".${branch}.${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".${branch}.${type}.${name} = \"${update_prev_version}\"" > ${release_info}_prev_tmp
+    fi
+    if [[ ! "${type}" =~ .*nightly.* ]] && [[ ! "${name}" =~ .*build_name.* ]]; then
+        if [[ ! -f ${release_dir}/${released_candidates_to_keep} ]] || [[ "x$(grep -rx ${version} ${release_dir}/${released_candidates_to_keep})" == "x" ]]; then
+            echo "${version}" >> ${release_dir}/${released_candidates_to_keep}
+        fi
+    fi
+}

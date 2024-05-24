@@ -1,0 +1,205 @@
+---
+general: {}
+repo_manifest_url: ssh://shm-gerrit:29418/SHM/AOSP-manifest
+gerrit_host: shm-gerrit
+branch_identifier: '0'
+project_branch: shm_t_0
+repo_release_manifest_url: ssh://shm-gerrit:29418/SHM/AOSP-manifest-release
+project_line: shm
+ssd_root: "/ssd/svc_shm_jenkins"
+stacktarget_file: StackTarget.txt
+default_email_sender: svc_shm_jenkins@elektrobit.com
+email_recipients: SHM_Gerrit_Integration@elektrobit.com,
+email_testing_team: SHM_Testers@elektrobit.com,
+project_type: android
+release_component: aosp
+android_version: t
+bundle_promotion_job: SHM-CI/aosp/Bundle-Verify-Promote/
+notify_integration_completion_in_gerrit: enabled
+prebuilt_release_required: 'yes'
+
+sonar_analysis: &sonar_analysis
+  sonar_server: https://sonarqube-pj-cos-1.ebgroup.elektrobit.com
+  sonar_scanner: /sonarqube/sonar-scanner/bin/sonar-scanner
+  sonar_build_wrapper: /sonarqube/build-wrapper-linux-x86/build-wrapper-linux-x86-64
+  sonar_projectkey_prefix: SHM
+  sonarqube_pipeline: SHM-CI/aosp/SonarqubeAnalysis_MultiBranch/shm_t_0
+  build_script: resources/sonarqube.sh
+#artifactory:
+  #job : SHM-CI/aosp/upload_libs_to_artifactory_pipeline/
+  #config_file: shm_t_0.cfg
+ccache: &ccache
+  enabled: 'true'
+  exec: "/usr/bin/ccache"
+  dir: "/ccache/.ccache"
+  umask: '002'
+  max_size: 500G
+
+default_target_templete: &default_target_templete
+  repo_manifest_xml: shm.xml
+  user_custom_build_env: ''
+  custom_env_vars: ''
+  build_type_list: userdebug
+  ccache: *ccache
+  verify: enabled
+  devel: enabled
+  snapshot: enabled
+
+supported_target_ids:
+  shm: &shm
+    << : *default_target_templete
+    lunch_target_template: shm_hmi-%s
+  shm_ux: &shm_ux
+    << : *default_target_templete
+    lunch_target_template: shm_ux-%s
+
+docker_image_id: artifactory.elektrobit.com/shm-releases-docker/android:devenv
+net_sharedrive: "/net/denue6nfs001/shm/flashfiles_shm"
+release_info_file: "/net/denue6nfs001/shm/flashfiles_shm/.release_info"
+update_release_info: 'true'
+dev_null: "/dev/null"
+OTM_freestyle_job:  SHM-CI/aosp/OTM_Test_Snapshot
+
+verify:
+  parallel_failfast:
+    Build: 'true'
+    Testing: 'true'
+  pipeline_make_targets: ''
+  files_to_publish: none
+  latest_build_link_name: latest
+  changeLogTypes: snapshot
+  sonarAnalysis:
+    << : *sonar_analysis
+    wait: 'false'
+  shm:
+    << : *shm
+    run_sonar_analysis: 'true'
+    testing:
+      T1:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '7200'
+        params:
+          TESTING_STAGE: T1
+  shm_ux:
+    << : *shm_ux
+    testing:
+      T1:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '7200'
+        params:
+          TESTING_STAGE: T1
+  stages:
+    - PreparePipeline
+    - PrepareWS
+    - SyncWS
+    - ChangeLog
+    - Build
+    - Testing
+    - PublishWS
+    - SonarqubeAnalysis
+    - CleanUpWS
+    - ReviewAndFeedback
+  stages_to_run_always:
+    - CleanUpWS
+    - ReviewAndFeedback
+devel:
+  pipeline_make_targets: ''
+  sync_timers: 30 10
+  aosp_devel_build_sync: enabled
+  files_to_publish: none
+  latest_build_link_name: latest
+  changeLogTypes: snapshot
+  additional_recipients:
+    sendmail: true
+    mail_ids: SHM_Gerrit_Developers@elektrobit.com
+  shm:
+    << : *shm
+    testing:
+      T2:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '10800'
+        params:
+          TESTING_STAGE: T2
+  shm_ux:
+    << : *shm_ux
+    testing:
+      T2:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '10800'
+        params:
+          TESTING_STAGE: T2
+  nfs_cleanup:
+    enabled: 'true'
+    older_than_days: '1'
+  stages:
+    - PreparePipeline
+    - PrepareWS
+    - SyncWS
+    - ChangeLog
+    - Build
+    - Testing
+    - PublishWS
+    - SonarqubeAnalysis
+    - NotifyIntegrationCompletion
+    - CleanUpWS
+    - Release
+    - NotifyRelease
+snapshot:
+  pipeline_make_targets: ''
+  publish_to_artifactory : 'disabled'
+  latest_build_link_name: latest_preint
+  files_to_publish: none
+  app_files_to_publish: none
+  changeLogTypes: snapshot
+  additional_recipients:
+    sendmail: true
+    mail_ids: SHM_Gerrit_Developers@elektrobit.com
+  sonarAnalysis:
+    << : *sonar_analysis
+    wait: 'false'
+  shm:
+    << : *shm
+    run_sonar_analysis: 'true'
+    testing:
+      T3:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '7200'
+        params:
+          TESTING_STAGE: T3
+  shm_ux:
+    << : *shm_ux
+    testing:
+      T3:
+        test_job: SHM-CT/AOSP-CT-Chain/AOSP-Continuous-Testing-Pipeline/shm_t_0
+        propagate: 'true'
+        wait: 'true'
+        timeout: '7200'
+        params:
+          TESTING_STAGE: T3
+  nfs_cleanup:
+    enabled: 'false'
+    older_than_days: '20'
+  stages:
+    - PreparePipeline
+    - PrepareWS
+    - SyncWS
+    - ChangeLog
+    - Build
+    - Testing
+    - OtmTest
+    - PublishWS
+    - SonarqubeAnalysis
+    - NotifyIntegrationCompletion
+    - CleanUpWS
+    - Release
+    - NotifyRelease

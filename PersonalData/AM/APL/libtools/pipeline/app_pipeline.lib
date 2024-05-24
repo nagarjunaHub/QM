@@ -1,0 +1,769 @@
+#!/bin/bash
+set -e
+source $( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )/common.lib
+source $( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/pipeline.lib
+# Rule: target id has to be same as manifest name.
+# To check if commit is being supported in the manifest.
+# First will check if user specify the target id (in case some target id not being used, but manifest still in the repo)
+# Else try to get all manifest available.
+
+
+code_change() {
+    # This function will check that is there any code change or not
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local workspace=${2?workspace required where new manifest file will be created}
+    local prebuilt_app_workspace=${3?prebuilt_app_workspace required which contain old manifest file}
+
+    cd ${workspace} && repo manifest -r -o ${workspace}/codeChange_manifest.xml
+    if [ -f ${prebuilt_app_workspace}/manifest.xml ]; then
+        diff ${workspace}/codeChange_manifest.xml ${prebuilt_app_workspace}/manifest.xml | grep 'path="app"' || true
+    fi
+    rm -rf ${workspace}/codeChange_manifest.xml
+}
+
+get_buildPerDay() {
+    # This function will return the buildPerDay for application
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local workspace=${2?workspace required where app build will be run}
+    local devenvDir=${3?devenv is required}
+    local prebuilt_app_workspace=${4?prebuilt_app_workspace required which contain old version log file}
+
+    oldVersion=""
+    buildPerDay=1
+    # get build number per day
+    if [ -d ${prebuilt_app_workspace} ]; then
+        if [ -f ${prebuilt_app_workspace}/artifact_version.log ]; then
+           oldVersion=$(grep "versionCode" ${prebuilt_app_workspace}/artifact_version.log | cut -d'=' -f2 )
+           pushd ${workspace}/app &>/dev/null
+           source ${devenvDir} &>/dev/null
+           [[ -f "${workspace}/app/gradlew" ]] && gradletool="./gradlew" || gradletool="gradle"
+           versionString=$(set -o pipefail; ${gradletool} logVersionInfo | grep "versionCode" | awk '{print substr($NF, 1, 5)}' 2>&1)
+           popd &>/dev/null
+           if [[ ${versionString} == ${oldVersion:0:5} ]]; then
+               buildPerDay=$((10#${oldVersion: -2}+1))
+           fi
+        fi
+    else
+        # Passing BUILD_NUMBER as buildPerDay for gradle libs
+        buildPerDay=${BUILD_NUMBER}
+    fi
+    echo "${buildPerDay}"
+}
+
+app_ws_worker() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local pipelineType=${2?pipelineType is required}
+    local devenv=${3?devenv is required}
+    local build_workspace=${4?build_workspace is required}
+    local repo_manifest_url=${5?repo_manifest_url is required}
+    local repo_manifest_revision=${6?repo_manifest_url is required}
+    local repo_manifest_xml=${7?repo_manifest_xml is required}
+    local sync_thread=2
+
+    if [ ! -d "${build_workspace}" ]; then
+      mkdir -p ${build_workspace}
+    fi
+    cd ${build_workspace}
+
+    source ${devenv}
+    echo "repo init -u ${repo_manifest_url} -b ${repo_manifest_revision} -m ${repo_manifest_xml}"
+    repo init -u ${repo_manifest_url} -b ${repo_manifest_revision} -m ${repo_manifest_xml}
+    echo "repo forall -c "git reset --hard" "
+    repo forall -c "git reset --hard"
+    echo "repo sync -d -q --force-sync -j${sync_thread}"
+    repo sync -d -q --force-sync -j${sync_thread}
+
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+        local gerrit_host=${8?gerrit_host is required}
+        local gerrit_project=${9?gerrit_project is required}
+        local gerrit_change_number=${10?gerrit_change_number is required}
+        local gerrit_patchset_number=${11?gerrit_patchset_number is required}
+        local dependencies=${12}
+        local download_type=$(get_download_type ${gerrit_host} ${gerrit_change_number} ${gerrit_project})
+        set -x
+
+        # download triggered change
+        repo download ${download_type} "${gerrit_project}" "${gerrit_change_number}/${gerrit_patchset_number}"
+
+        #download dependencies related with triggered change
+        for dep in ${dependencies[@]}; do
+            local dp=$(echo ${dep} | cut -d, -f1)
+            local patchset_number=$(echo ${dep} | cut -d, -f2)
+            dp_project=$(get_project_from_change_number ${gerrit_host} ${dp})
+            repo download ${download_type} "${dp_project}" "${dp}/${patchset_number}"
+        done
+        set +x
+    fi
+}
+
+validate_distribution_url() {
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local app_workspace=${2?app_workspace is required}
+    local gradle_distributionsUrl=${3?gradle_distributionsUrl is required}
+    expected_url="${gradle_distributionsUrl#https://}/gradle-[0-9]+\\.[0-9]+(\\.[0-9]+)?-bin\\.zip"
+    pushd ${app_workspace} &>/dev/null
+    distribution_url="$(find ${app_workspace} -type f -name gradle-wrapper.properties -exec cat {} + | grep '^distributionUrl=' | cut -d '=' -f2)"
+    distribution_domain=$(echo "$distribution_url" | awk -F 'https\\\\://' '{print $2}')
+    # Check if distributionUrl points to artifactory.elektrobit.com
+    if [[ "${distribution_domain}" =~ ^${expected_url}$  ]]; then
+        echo "DistributionUrl is correctly configured."
+    else
+        set +x
+        echo "
+    ========================================================================================
+    Error: The gradle distribution url ${distribution_url} is not permitted.
+    Please use "${gradle_distributionsUrl}" as gradle distribution url.
+    ========================================================================================
+        "
+        set -x
+        exit 1
+    fi
+    popd &>/dev/null
+}
+
+app_build() {
+    # This function is used to build an app project
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local workspace=${2?workspace required where app build will be run}
+    local devenvDir=${3?devenvDir with env_setup.sh is required}
+    local pipelineType=${4?pipelineType is required}
+    local branch=${5?branch is required}
+    local buildPerDay=${6?buildPerDay required to get versionCode}
+    local extBuildScript=${7}
+    local jdkversion=${8}
+    local branchIdentifier=${9}
+
+    # Check, if remote repositores are set
+    pushd ${workspace}/app &>/dev/null
+    local GERRIT_PROJECT_URL=$(git remote get-url $(git remote))
+    local GERRIT_PROJECT=${GERRIT_PROJECT_URL##*/}
+    echo "----------------Gerrit_project from build: ${GERRIT_PROJECT} -----------------"
+    if [[ ${GERRIT_PROJECT} == *"HMI"* ]] || [[ ${GERRIT_PROJECT} == *"AACS"* ]]; then
+        echo "External repositories check has been neglected for HMI project"
+    else
+        if grep -Przo "(?s)repositories {.*?(jcenter|maven|google)\\(\\).*?}" --include="*.gradle" ${workspace}; then
+            set +x
+            echo "
+        ============================================================
+        Warning: External repositories are only allowed for HMI project. Failing build.
+        ============================================================
+            "
+            set -x
+            exit 1
+        fi
+    fi
+    # Check Environment
+    if [[ "x${devenvDir}" = "x" ]]; then
+        echo "devevnvDir not set. Please set to correct devenv to use"
+        exit 1
+    fi
+    if [[ "x${workspace}" = "x" ]]; then
+        echo "Please define the workspace"
+        exit 1
+    fi
+
+    build_parameters="-PforceIncludeBinary=true"
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*master.* ]]; then
+        build_parameters="${build_parameters} -PbranchIdentifier=${branchIdentifier} -PbuildEnvironment=prod -PbuildNumber=${buildPerDay}"
+    fi
+
+    gradleCfg="${workspace}/.gradle"
+    mkdir -p ${gradleCfg}
+
+    # get repo name of built project and create link
+    current_repo=$(basename $(git remote -v | awk '{print $2}'))
+    popd &>/dev/null
+    cd ${workspace}
+    ln -sfT app ${current_repo}
+    set +x
+    source ${devenvDir} ${jdkversion}
+    # Get Devenv version info
+    devenv -v > ${workspace}/devenv_version.txt || true
+    set -x
+
+    # Default gradle parameters used for all builds
+    gradle_parameters="--refresh-dependencies --info --project-cache-dir ${workspace}/gradle_cache --gradle-user-home ${gradleCfg} "
+    # Since the gradle user home is set to the current workspace, we need to ensure that
+    # a gradle.properties is available
+    cp ~/.gradle/gradle.properties ${gradleCfg}/
+    # Config for gradle targets
+    #jacocoTestCoverageReport added to get coverage report for sonarqube analysis
+    buildtargets="clean assemble logAllInfo jacocoTestDebugUnitTestReport"
+    # Clean up old stuff
+    ## TODO need to check cleanup stuff before starting the build
+    outFiles=$(ls ${workspace}/*.output 2> /dev/null | wc -l)
+    if [[ "${outFiles}" != "0" ]]; then
+        rm ${workspace}/*.output
+    fi
+    logFiles=$(ls ${workspace}/*.log 2> /dev/null | wc -l)
+    if [[ "${logFiles}" != "0" ]]; then
+        rm ${workspace}/*.log
+    fi
+
+    # Start the build of the app
+    echo "---- Building app - will also build all dependencies ----"
+    java_version=$(java -version 2>&1 | awk -F '"' '/version/ {print $2}')
+    echo "JAVA_VERSION = $java_version" > "${workspace}/build_info.log"
+    pushd ${workspace}/app &>/dev/null
+    echo "build url: ${BUILD_URL}" > ${workspace}/build_${BUILD_NUMBER}.output
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*master.* ]]; then
+        repo start ${branch}
+    fi
+    if [[ -f "${workspace}/app/gradlew" ]]; then
+        chmod +x ${workspace}/app/gradlew
+        gradletool="./gradlew"
+    else
+        gradletool="gradle"
+    fi
+    if [[ "x${extBuildScript}" == "x" ]]; then
+       (set -o pipefail; ${gradletool} ${build_parameters} ${buildtargets} ${gradle_parameters} 2>&1 |& tee -a ${workspace}/build_${BUILD_NUMBER}.output )
+    else
+       (set -o pipefail; ${extBuildScript} 2>&1 |& tee -a ${workspace}/build_${BUILD_NUMBER}.output )
+    fi
+    popd &>/dev/null
+}
+
+publish_to_git(){
+    # This function is used to publish the generated and tested apks to git binary repo
+    # This is also used to publish the 3rd party apps
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local app_workspace=${2?app_workspace required where app build is executed}
+    local prebuilt_app_workspace=${3?prebuilt_app_workspace required binary apks dir}
+    local branch=${4?branch required to push the changes}
+    local branch_identifier=${5?branch_identifier required to push the changes}
+    local devenv=${6?devenv required to get versionCode}
+    local publish_app=${7}
+    local jenkins_pipelineInfo=${8}
+    local pipeline_libraryInfo=${9}
+
+    direct_push="false"
+    workspace=$(dirname ${app_workspace})
+    # create version.txt file
+    # pushd ${app_workspace}
+    # source ${devenv}
+    # find build -name *.apk | head -1 | xargs aapt dump badging | grep "versionCode"
+    # find build -name *.apk | head -1 | xargs aapt dump badging | grep "versionCode" | sed -e "s/.*versionCode='//" -e "s/' .*//" > ${workspace}/version.txt
+    # popd &>/dev/null
+
+    if [ -f "${prebuilt_app_workspace}/.ci_direct_push.txt" ]; then
+        direct_push="true"
+        cd ${workspace}
+        repo manifest -r -o temp_manifest.xml
+        GERRIT_PROJECT=$(cd ${app_workspace} && repo list -n $PWD)
+        GERRIT_NEWREV=$(cd ${app_workspace} && git log -1 --pretty=format:%H)
+        # VERSION=$(cat ${workspace}/version.txt)
+        if [[ -f ${app_workspace}/build/logs/artifact_version.log ]]; then
+            VERSION=$(cat ${app_workspace}/build/logs/artifact_version.log  | grep  -e versionName= | cut -d'=' -f2)
+        else
+            # create artifact_version file
+            pushd ${app_workspace}
+            source ${devenv}
+            find build -name *.apk | head -1 | xargs aapt dump badging | grep -oP "versionCode='\K[^']+(?=')" | sed "s/^/versionCode=/" > ${workspace}/artifact_version.log
+            popd &>/dev/null
+            VERSION=$(cat ${workspace}/artifact_version.log)
+        fi
+        if [ -f ${prebuilt_app_workspace}/manifest.xml ]; then
+            commitSHA=$(repo diffmanifests --raw  ${workspace}/temp_manifest.xml ${prebuilt_app_workspace}/manifest.xml | grep '^C app' | cut -d' ' -f3-)
+            if [[ "x${commitSHA}" == "x" ]]; then
+              commit_msg="no source code change"
+            else
+              commitSHA=( $commitSHA )
+              commit_msg=$(cd ${app_workspace} && git log --oneline ${commitSHA[1]}..${commitSHA[0]} | cut -d' ' -f2-)
+            fi
+        else
+             commit_msg="no source code change"
+        fi
+        commit_msg="${commit_msg}
+            GERRIT_PROJECT :  ${GERRIT_PROJECT}
+            GERRIT_NEWREV  :  ${GERRIT_NEWREV}
+            GERRIT_BRANCH  :  ${branch}
+            VERSION        :  ${VERSION}
+            BUILD_NUMBER   :  ${BUILD_NUMBER}"
+    else
+        commit_msg="Integrate 3rd party app"
+    fi
+    if [ -d ${prebuilt_app_workspace} ]; then
+        cd ${app_workspace}
+        git checkout ${branch}
+        if [[ "${publish_app}" != "" ]]; then
+            apk_list=""
+            for apk_file in ${publish_app}; do
+                echo ${apk_file}
+                app_path=$(find ${app_workspace} -type f  -name ${apk_file})
+                apk_list="${apk_list} ${app_path}"
+            done
+        else
+            apk_list=$(find ${app_workspace} -type f  -name "*.apk")
+        fi
+
+        cd ${prebuilt_app_workspace}
+        git checkout ${branch}
+        echo "copied applications: ${apk_list}"
+        cp -r ${apk_list} ${prebuilt_app_workspace}
+        # copy content of the prebuilts folder to prebuilt repository
+        if [ -d ${app_workspace}/prebuilt ]; then
+            cp -r ${app_workspace}/prebuilt/* ${prebuilt_app_workspace}
+        fi
+        build_info_log="${app_workspace}/build/logs/build_info.log"
+        if [[ -f "${workspace}/app/gradlew" ]]; then
+            if [[ ! -e "${app_workspace}/build/logs" ]]; then
+                mkdir -p "${app_workspace}/build/logs"
+            fi
+            distribution_url="$(find ${app_workspace} -type f -name gradle-wrapper.properties -exec cat {} + | grep '^distributionUrl=' | cut -d '=' -f2)"
+            echo "gradle_distribution_url = ${distribution_url}" > "${build_info_log}"
+            echo >> "${build_info_log}"
+        fi
+        echo "${jenkins_pipelineInfo}" >> "${build_info_log}"
+        echo "${pipeline_libraryInfo}" >> "${build_info_log}"
+        echo >> "${build_info_log}"
+        cat "${workspace}/build_info.log" >> "${build_info_log}"
+        cp -r ${workspace}/devenv_version.txt ${prebuilt_app_workspace}/devenv_version.txt || true
+        cp -r ${app_workspace}/build/logs/*.log ${prebuilt_app_workspace} || true
+        #publish manifest file to prebuilt_module/lib projects
+        rm -rf ${prebuilt_app_workspace}/version.txt || true
+        cp ${workspace}/artifact_version.log ${prebuilt_app_workspace} || true
+        echo ${branch_identifier} > ${prebuilt_app_workspace}/branch_identifier.txt
+
+        cd ${prebuilt_app_workspace}
+        if git status --porcelain |grep .; then
+            git_push ${prebuilt_app_workspace} ${branch} "${commit_msg}" "${direct_push}"
+
+            if ! [[ "${prebuilt_app_workspace}" =~ .*sony.* ]]; then
+                cd ${workspace}
+                repo manifest -r -o ${prebuilt_app_workspace}/manifest.xml
+                commit_msg="${VERSION}: Add manifest file"
+                cd ${prebuilt_app_workspace}
+                if git status --porcelain |grep .; then
+                    git_push ${prebuilt_app_workspace} ${branch} "${commit_msg}" "${direct_push}"
+                    git tag -a ${VERSION} -m ${VERSION}
+                    git push origin ${VERSION}
+                else
+                    echo "Nothing commited to git!!!"
+                fi
+            fi
+        else
+            echo "Nothing commited to git!!!"
+        fi
+    else
+        echo "${prebuilt_app_workspace} is not available. Please add Binary repo project into AppsManifests and restart the master build"
+        exit 1
+    fi
+}
+
+publish_javadoc() {
+    # This function is used to create and publish javadoc to asterix2-documentation server
+
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local devenv=${2?devenv required to get the gradle}
+    local build_workspace=${3?build_workspace required for gradle folder path}
+    local hostMyDocs=${4?hostMyDocs required to upload the docs}
+    local app_name=${5?app_name required to upload the docs}
+    local branch=${6?branch required to get version}
+    local branchIdentifier=${7?branchIdentifier required to get version}
+    local buildPerDay=${8?buildPerDay required to get versionCode}
+
+    # generate javadoc
+    cd ${build_workspace}/app
+    set +x
+    source ${devenv}
+    set -x
+    build_parameters="-PforceIncludeBinary=true -PbranchName=${branch} -PbranchIdentifier=${branchIdentifier} -PbuildEnvironment=prod -PbuildNumber=${buildPerDay}"
+    build_targets="javaDocJar"
+    [[ -f "${build_workspace}/app/gradlew" ]] && gradletool="./gradlew" || gradletool="gradle"
+    ${gradletool} ${build_parameters} ${build_targets}
+    if [[ ! -f build/logs/artifact_version.log ]]; then
+        ${gradletool} ${build_parameters} logAllInfo
+    fi
+    VERSION=$(cat build/logs/artifact_version.log  | grep  -e versionName= | cut -d'=' -f2)
+    echo "Version for publishing documents: ${VERSION}"
+    # publish javaDoc
+    if [ -e ${build_workspace}/app/build/libs/*javadoc.jar ]; then
+        cd ${build_workspace}/app/build/libs
+        cp *-javadoc.jar doxygen.zip
+        # curl command to publish generated *.jar file to hostMyDocs server
+        curl --request POST --insecure --url ${hostMyDocs}/BackEnd/addProject \
+                        --header "content-type: multipart/form-data;" \
+                        --header "boundary=---011000010111000001101001" \
+                        -F "name=${app_name}" -F "version=${VERSION}" \
+                        -F "language=javadoc" \
+                        -F "archive=@doxygen.zip;type=application/zip" --netrc --silent
+    else
+        echo "javaDocJar file has not been available so => skipping to upload the documents"
+    fi
+}
+
+
+publish_asciidoc() {
+    # This function is used to create and publish asciidoc to hostMyDocs server
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local devenv=${2?devenv required to get the gradle}
+    local build_workspace=${3?build_workspace required for gradle folder path}
+    local hostMyDocs=${4?hostMyDocs required to upload the docs}
+    local app_name=${5?app_name required to upload the docs}
+    local docker_img=${6?docker_image required to generate adoc}
+    local branch=${7?branch required to get version}
+    local branchIdentifier=${8?branchIdentifier required to get version}
+    local buildPerDay=${9?buildPerDay required to get versionCode}
+
+    cd ${build_workspace}/app
+    set +x
+    source ${devenv}
+    set -x
+    [[ -f "${build_workspace}/app/gradlew" ]] && gradletool="./gradlew" || gradletool="gradle"
+    if [[ ! -f build/logs/artifact_version.log ]]; then
+        build_parameters="-PforceIncludeBinary=true -PbranchName=${branch} -PbranchIdentifier=${branchIdentifier} -PbuildEnvironment=prod -PbuildNumber=${buildPerDay}"
+        ${gradletool} ${build_parameters} logAllInfo
+    fi
+    VERSION=$(cat build/logs/artifact_version.log  | grep  -e versionName= | cut -d'=' -f2)
+
+    if [[ -d src/docs/asciidoc ]]; then
+      docker pull ${docker_img}
+      docker system prune -f
+      echo "-------Generating asciidoc inside $APP/build/asciidoc-------"
+      docker run --rm -v $(dirname ${devenv}):$(dirname ${devenv}) -v ${build_workspace}/app:/app -u $(id -u):$(id -g) ${docker_img} /bin/bash -c "source ${devenv} && adoc -i /app/src/docs/asciidoc -o /app/build/asciidoc" || true
+      #publish asciidoc
+      if [[ -d ${build_workspace}/app/build/asciidoc ]]; then
+          cd ${build_workspace}/app/build
+          zip -rq asciidoc.zip asciidoc
+
+          curl --request POST --insecure --url ${hostMyDocs}/BackEnd/addProject \
+                      --header "content-type: multipart/form-data;" \
+                      --header "boundary=---011000010111000001101001" \
+                      -F "name=${app_name}" -F "version=${VERSION}" \
+                      -F "language=asciidoc" \
+                      -F "archive=@asciidoc.zip;type=application/zip" --netrc --silent
+      else
+          echo "asciidoc has not been available so => skipping to upload the documents"
+      fi
+    else
+        echo "docs/asciidoc folder is not available in the project so => skipping to generate and upload the documents"
+    fi
+}
+
+publish_to_artifactory() {
+    # This function is used to publish the lib to artifactory
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local devenv=${2?devenv required to get the gradle}
+    local app_name=${3?app_name required where app build is executed}
+    local build_workspace=${4?build_workspace required for gradle folder path}
+    local branch=${5?branch required}
+    local buildPerDay=${6?buildPerDay required to get versionCode}
+    local force_publish=${7:-'no'}
+
+    source ${devenv}
+    # gradle parameters to run the build
+    gradle_parameters="--refresh-dependencies --project-cache-dir ${build_workspace}/gradle_cache --gradle-user-home ${build_workspace}/.gradle -PbuildEnvironment=prod -PbuildNumber=${buildPerDay}"
+
+    # clean should NOT be called here, because we want to reuse aars that were created during build step
+    build_targets="artifactoryPublish"
+
+    if [[ ${force_publish} != "no" ]] ; then
+        echo "---- Changes detected. Publishing artifacts to Artifactory... ----"
+        echo "---- Publishing artifacts ----"
+        [[ -f "${build_workspace}/app/gradlew" ]] && gradletool="./gradlew" || gradletool="gradle"
+        cd ${build_workspace}/app  && repo start ${branch} && ${gradletool} ${build_targets} ${gradle_parameters}
+        cd ${build_workspace}
+        if [ ! -d $(dirname ${diff_path}) ]; then
+            mkdir -p ${diff_path}
+        fi
+    fi
+}
+
+publish_commitInfo() {
+    # This function generates app changes since last devel and stores them into a file.
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local app_workspace=${2?app_workspace required where app build is executed}
+    local prebuilt_app_workspace=${3?prebuilt_app_workspace required binary apks dir}
+    local branch=${4?branch required to push the changes}
+    local gerrit_host=${5?gerrit_host is required}
+    local repo_release_manifest_url=${6?release_manifest_url is required}
+    local repo_manifest_xml=${7?repo_manifest_xml is required}
+    local net_sharedrive=${8?net_sharedrive is required}
+    # Define workspace directory
+    local workspace=$(dirname ${app_workspace})
+    prebuilt_repo=$(cat ${prebuilt_app_workspace}/manifest.xml | grep 'path="prebuilt_app"' | grep -o -P '(?<=name=").*?(?=" )')
+    # Clone the repository
+    cd ${workspace}
+    git clone ${repo_release_manifest_url} -b ${branch} aosp
+    # Get commits from last devel
+    cd ${workspace}/aosp
+    commits_from_last_devel=$(cat ${workspace}/aosp/${repo_manifest_xml} | grep "${prebuilt_repo}" | grep -o -P '(?<=revision=").*?(?=" )')
+    # Get current app source revision
+    cd ${prebuilt_app_workspace}
+    current_app_source_revision=$(cat manifest.xml | grep 'path="app"' | grep -o -P '(?<=revision=").*?(?=" )')
+    # Fetch and retrieve the app's commits since the last devel
+    previous_app_source_revision_devel=$(get_previous_commit_from_remote "${commits_from_last_devel}" "${gerrit_host}" "${prebuilt_repo}")
+    if [ -z "$previous_app_source_revision_devel" ]; then
+        # Set a default value for previous_app_source_revision_devel
+        previous_app_source_revision_devel=$(cd ${app_workspace} && git log --pretty=format:"%H" -n 1 HEAD~1)
+    fi
+    app_commits_since_last_devel=$(cd ${app_workspace} && git rev-list --ancestry-path ${previous_app_source_revision_devel}..${current_app_source_revision})
+    echo "${app_commits_since_last_devel}"
+    # Define paths for devel files
+    local app_changes_file="${workspace}/app_changes_since_last_devel_${branch}.txt"
+    process_commits() {
+        local commit_list="$1"
+        for commit in $commit_list; do
+            change_number=$(get_change_number_from_commit_sha "${gerrit_host}" "${commit}")
+            if [[ -z ${change_number} ]]; then
+                echo "WARNING: Could not get change number for commit-sha ${commit}. Probably this was a commit pushed to HEAD directly."
+            else
+                if [[ $(echo "${change_number}" | wc -l) -gt 1 ]]; then
+                    # Multiple results can occur when searching for commit-sha due to cherry-picks/reverts.
+                    # We find the correct change number by querying Gerrit for each change number and matching the resulting commit-sha with the current commit.
+                    for c in ${change_number}; do
+                        commit_sha=$(get_commit_id_from_change_number "${gerrit_host}" "${c}")
+                        if [[ ${commit_sha} == ${commit} ]]; then
+                            change_number=${c}
+                                break
+                        fi
+                    done
+                fi
+                patchset_number=$(get_current_patchset_from_change_number "${gerrit_host}" "${change_number}")
+                echo "${change_number},${patchset_number}"
+            fi
+        done
+    }
+    # Process commits from last devel
+    if [[ -n "${app_commits_since_last_devel}" ]]; then
+        process_commits "${app_commits_since_last_devel}" >> "${app_changes_file}"
+    else
+        echo "No commits found since last devel. Skipping file creation."
+        return
+    fi
+    # Check if the net sharedrive directory exists
+    if [[ -d "${net_sharedrive}" ]]; then
+        local output_file="${net_sharedrive}/devel/$(basename "${app_changes_file}")"
+        # Copy files to net share drive and check for duplicates
+        if [[ -e "${output_file}" ]]; then
+            echo "File '${output_file}' exists. Appending only unique entries."
+            awk 'NR==FNR{a[$0]; next} !($0 in a)' "${output_file}" "${app_changes_file}" >> "${output_file}"
+         else
+            echo "File '${output_file}' not present. Copying unique entries."
+            sort -u "${app_changes_file}" > "${output_file}"
+        fi
+    else
+        echo "Error: Net sharedrive directory ${net_sharedrive} not found."
+        exit 1
+    fi
+    # Remove files from workspace
+    rm -rf ${workspace}/aosp ${app_changes_file}
+}
+
+git_push(){
+    # This function is used to publish the generated and tested apks to git binary repo
+    local project_workspace=${1?project_workspace required to push from that project dir}
+    local branch=${2?branch required to push the change}
+    local commit_msg=${3?commit_msg required to push the changes}
+    local direct_push=${4?direct_push is required to push without review:true/false}
+    local gerrit_reviewer_list=${5}
+
+    pushd ${project_workspace} &>/dev/null
+    git add -A
+    git status
+    if git status --porcelain |grep .; then
+        git commit -m "${commit_msg}"
+        if [[ "${direct_push}" == "true" ]]; then
+            git push origin ${branch}
+        else
+            gerrit_reviewer="%"
+            if [[ "${gerrit_reviewer_list}" != "" ]]; then
+                for item in $gerrit_reviewer_list; do
+                    gerrit_reviewer=$gerrit_reviewer"r=${item},"
+                done
+            fi
+            git push origin HEAD:refs/for/${branch}${gerrit_reviewer%?}
+        fi
+    else
+        echo "nothing to commit !!!"
+    fi
+    popd &>/dev/null
+}
+
+aosp_preinstalled_configuration(){
+    # This function will check if any preinstalled_app doesn't have *Android.mk file
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local prebuilt_app_workspace=${2?prebuilt_app_workspace required binary apks dir}
+    local branch=${3?branch required to push the changes}
+    local aosp_project=${4?aosp_project is required to integrate app into aosp}
+    local aosp_preinstalled_app=${5}
+    local aosp_prebuilt_make_file=${6?aosp_prebuilt_make_file}
+    local template_make_file=${7?template_make_file}
+    local gerrit_reviewer=${8?gerrit_reviewer}
+
+    new_app="false"
+    commit_msg="Add prebuilt configuration for:"
+    # generate Android.mk file in case it's required
+    if [[ "${aosp_preinstalled_app}" != "" ]]; then
+        apps=""
+        for apk in ${aosp_preinstalled_app}; do
+            if [[ "${apk}" =~ .*debug.* ]] || [[ "${apk}" =~ .*release.* ]]; then
+                apk=${apk%-*}
+            else
+                apk=${apk%.*}
+            fi
+            mk_file="${apk}.app.Android.mk"
+            if [ ! -f ${prebuilt_app_workspace}/${mk_file} ]; then
+                generate_android_make_file ${verbose} ${prebuilt_app_workspace} ${apk} ${mk_file} ${template_make_file}
+                apps="${apps} ${apk}"
+            fi
+        done
+
+        #commit *.Android.mk file into app prebuild project
+        if [[ "${apps}" != "" ]]; then
+            commit_msg="${commit_msg} ${apps}"
+            git_push ${prebuilt_app_workspace} ${branch} "${commit_msg}" "false" "${gerrit_reviewer}"
+        fi
+
+        echo "-----------add prebuilt app into aosp project ----------------------"
+        # add preinstalled app into aosp project and push for review
+        # disabling commit to aosp project as aed2_prebuilt_apks.mk file is not available
+#        if [[ "${apps}" != "" ]]; then
+#            pushd $(dirname ${prebuilt_app_workspace}) &>/dev/null
+#            git clone "${aosp_project}" -b ${branch} aosp_project
+#            pushd aosp_project &>/dev/null
+#            for app in ${apps}; do
+#                if ! grep "PRODUCT_PACKAGES.* ${app}" ${aosp_prebuilt_make_file}; then
+#                    sed -i "s/PRODUCT_PACKAGES += .*/& ${app}/" ${aosp_prebuilt_make_file}
+#                fi
+#            done
+#            commit_msg="Integrate Gradle/3rd party app: ${apps}"
+#            git_push $(dirname ${prebuilt_app_workspace})/aosp_project ${branch} "${commit_msg}" "false" "${gerrit_reviewer}"
+#            popd &>/dev/null
+#            popd &>/dev/null
+#        fi
+    fi
+}
+
+sonarqube_analysis(){
+    # This function will be used for sonarqube analysis and publish the result to sonarqube server
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+    local sonar_scanner=${2?sonar_scanner required for sonarqube analysis}
+    local sonar_server=${3?sonar_server required to publish the sonar analysis}
+    local pipelineType=${4?pipelineType is required}
+    local branch=${5?branch required to publish the sonar analysis}
+    local app_workspace=${6?app_workspace required to provide src path}
+    local sonar_projectkey_prefix=${7?sonar_projectkey_prefix required to provide the project space for sonar analysis}
+    local build_url=${8?build_url requried to send submit description}
+    local jacoco_report_path=${9?jacoco_report_path requried to send report.xml file}
+
+    gerrit_project=$(cd ${app_workspace} && repo list -n $PWD)
+    cd ${app_workspace}/
+    if find . -type f -name "sonar-project.properties" | grep sonar-project.properties; then
+        echo "sonar-project.properties file found at app/*/sonar-project.properties. Running sonarqube analysis"
+        curl "${build_url}/submitDescription" -n --data 'Sonarqube: ENABLED'
+        sonar_login=$(cat ~/.sonar_credentials)
+        sonar_projectkey=${sonar_projectkey_prefix}:$(echo ${gerrit_project} | tr "/" ":")
+        sonar_projectname=${sonar_projectkey_prefix}:${gerrit_project}
+        cd ${app_workspace}/
+        srcdirs=$(find . -maxdepth 3 -type d -name main -o -name main | tr '\n' ',')
+        testdirs=$(find . -maxdepth 3 -type d -name "test*" -o -name "androidTest*" | grep -v build/ | tr '\n' ',')
+        java_lib_dirs=$(find . -maxdepth 3 -type d -name build | tr '\n' ',')
+        version=$(cat build/logs/artifact_version.log  | grep  -e versionName= | cut -d'=' -f2)
+        jacoco_xml_path=$(find ${jacoco_report_path} -type f -name report.xml -exec printf "%s," {} + | sed 's/,$//')
+
+        # Commented the below lines of code as Home App is using devenv template from change-Id: 10412,10145,10511,10510
+        # If there is a requirement to build to an older commits please uncomment these lines.
+        # if [[ ${gerrit_project} == *"Home"* ]]; then
+        #     jacoco_xml_path=$(find . -type f -name report.xml)
+        #     version=$(cat $(dirname ${app_workspace})/version.txt)
+        # fi
+        export JAVA_HOME=/net/denue6nfs001/shm/sonarqube/jdk-latest/
+        export PATH=/net/denue6nfs001/shm/sonarqube/jdk-latest/bin:$PATH
+        extra_args=
+        if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+           local gerrit_change_number=${10?gerrit_change_number is required}
+           local gerrit_patchset_number=${11?gerrit_patchset_number is required}
+           local gerrit_refspec=${12?gerrit_patchset_number is required}
+           extra_args="$extra_args -Dsonar.pullrequest.key=${gerrit_change_number}-${gerrit_patchset_number}"
+           extra_args="$extra_args -Dsonar.pullrequest.base=${branch}"
+           extra_args="$extra_args -Dsonar.pullrequest.branch=${gerrit_refspec}"
+        else
+           extra_args="$extra_args -Dsonar.branch.name=${branch}"
+        fi
+        [[ ! -z $testdirs ]] && extra_args="$extra_args -Dsonar.tests=$testdirs"
+        [[ ! -z $srcdirs ]] && extra_args="$extra_args -Dsonar.sources=$srcdirs"
+        [[ ! -z $java_lib_dirs ]] && extra_args="$extra_args -Dsonar.java.libraries=$java_lib_dirs"
+        rm -rf .scannerwork
+        ${sonar_scanner} -Dsonar.login=${sonar_login} \
+             -Dsonar.projectKey=${sonar_projectkey} \
+             -Dsonar.projectName=${sonar_projectname} \
+             -Dsonar.host.url=${sonar_server} \
+             -Dsonar.java.binaries=${app_workspace} \
+             -Dsonar.coverage.jacoco.xmlReportPaths=${jacoco_xml_path} \
+             -Dsonar.projectVersion=${version} \
+             -Dsonar.ws.timeout=180 \
+             -Dsonar.scm.enabled=true \
+             -Dsonar.scm.provider=git \
+             -Dsonar.c.file.suffixes=- -Dsonar.cpp.file.suffixes=- -Dsonar.objc.file.suffixes=- \
+             $extra_args
+    else
+        echo "sonar-project.properties file NOT found. So, Skipping => Sonarqube analysis"
+        echo "Exiting now"
+        curl "${build_url}/submitDescription" -n --data 'Sonarqube: NOT_ENABLED'
+    fi
+}
+
+generate_android_make_file(){
+    # This function will be used to generate required Android.mk file to prebuilt_workspace to integrating the apk into snapshot
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local prebuilt_app_workspace=${2?prebuilt_app_workspace required to generate the Android.mk in this dir}
+    local app=${3?app required to create android.mk file for that app}
+    local mk_file=${4?mk_file required to get android.mk file name}
+    local template_make_file=${5?template_make_file}
+
+    cp $(dirname ${prebuilt_app_workspace})/${template_make_file} ${prebuilt_app_workspace}/${mk_file}
+    sed -i "s/__APP_NAME__/${app}/" ${prebuilt_app_workspace}/${mk_file}
+    cp $(dirname ${prebuilt_app_workspace})/Android.mk ${prebuilt_app_workspace}/Android.mk
+}
+
+cleanup_ws(){
+    # This function will be used to delete the workspaces.
+    local verbose=${1?verbose value required. Should be true or false}
+    [[ $verbose == "true" ]] && set -x
+
+    local pipelineType=${2?pipelineType is required}
+    local build_workspace=${3?build_workspace is required} #current workspace
+    local build_number=${4?build_number is required} # required for master pipeline
+
+    if [[ "$(toLowerCase ${pipelineType})" =~ .*verify.* ]]; then
+      rm -rf ${build_workspace}
+      # delete the @tmp dirs generated by pipeline
+      rm -rf ${build_workspace}@tmp
+    else
+      #delete all the older build workspace for master pipeline
+      cd $(dirname ${build_workspace})
+      folders=$(ls $(dirname ${build_workspace}))
+      for folder in ${folders[@]}; do
+        if [[ "${folder}" != "${build_number}" ]]; then
+            rm -r ${folder} || true
+        fi
+      done
+      # delete the @tmp dirs generated by pipeline
+      rm -rf *@tmp
+    fi
+
+}

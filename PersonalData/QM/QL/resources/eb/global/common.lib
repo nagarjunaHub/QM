@@ -1,0 +1,87 @@
+######################### SHELL'S HELPER ##################################
+# import com.eb.lib.jobUtils
+# import com.eb.lib.commonEnvironment
+# outPut = new jobUtils().runShell("source ${new commonEnvironment().loadBashLibs()} && printThis 'Testing Usage'")
+###########################################################################
+standardize_string() {
+    echo "$(echo "${1}" | sed -e 's/^[[:space:]]*//' | sed -e 's/[[:space:]]*$//' | tr -d '\n' | tr -d '\r')"
+}
+
+# Function supports to send email with plain text or hmtl
+# multiple recipients, CC addresses, reply-to addresses, and attachments.
+eb_mail(){
+    ###############################################################################
+    ## Examples:
+    ## eb_mail -s/--subject "This is a test message" \
+    ##         -m/--mime "text/html" \
+    ##         -f/--from "sender@abc.com" \
+    ##         -t/--to "recip1@abc.com,recip2@abc.com" \
+    ##         -c/--cc "cc1@abc.com,cc2@abc.com" \
+    ##         -b/--body "content here"
+    ##         -a/--attachments "file1 file2"
+    ###############################################################################
+
+    options=$(getopt -l "subject:,body:,from:,to:,cc:,mime:,attachments:," -o "s:b:f:t:c:m:a" -a -- "$@")
+    eval set -- "${options}"
+
+    while true; do
+        case $1 in
+        -s|--subject)
+            shift
+            subject="${1}"
+            ;;
+        -b|--body)
+            shift
+            body="${1}"
+            ;;
+        -f|--from)
+            shift
+            from="${1?from is required}"
+            ;;
+        -t|--to)
+            shift
+            to="${1}"
+            ;;
+        -c|--cc)
+            shift
+            cc="${1}"
+            ;;
+        -m|--mime)
+            shift
+            mime="${1:-text/plain}"
+            ;;
+        -a|--attachments)
+            shift
+            attachments="${1}"
+            ;;
+        --)
+            shift
+            break;;
+        *)
+            echo "Wrong input";
+            return 1;;
+        esac
+    shift
+    done
+
+    boundary="eb1sendmail2lib3"
+    message="From: ${from}\nTo: ${to}"
+    [[ "x${cc}" != "x" ]] && message="${message}\nCc: ${cc}"
+    message="${message}\nSubject: ${subject}"
+    message="${message}\nMIME-Version: 1.0"
+    message="${message}\nContent-Type: multipart/mixed; boundary=${boundary}"
+    message="${message}\n--${boundary}"
+    message="${message}\nContent-Disposition: inline"
+    message="${message}\nContent-Type: ${mime}; charset=\"us-ascii\""
+    message="${message}\n\n${body}"
+    # Add attachments, if any.
+    for at in ${attachments}; do
+        fn=$(basename ${at})
+        message="${message}\n--${boundary}"
+        message="${message}\nContent-Transfer-Encoding: base64"
+        message="${message}\nContent-Type: application/octet-stream; name=${fn}"
+        message="${message}\n\n$(base64 ${at})"
+    done
+    message="${message}\n--$boundary--"
+    printf "${message}" | sendmail -t
+}

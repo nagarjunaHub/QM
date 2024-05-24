@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+    <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/" name="shm-gerrit" review="ssh://shm-gerrit.elektrobit.com:29418/"/>
+    <!-- default remote="shm-gerrit" sync-j="2" revision="shm_0wk_0"/ -->
+
+    <include name="DN_04.01_20231107_1224_2489.xml"/>
+
+    <!-- To rebuild qnx on new aosp snapshot -->
+    <project path=".aosp-manifest-release" name="SHM/AOSP-manifest-release" revision="shm_t_0_master" remote="shm-gerrit"/>
+
+    <!-- SHM specific Layers -->
+    <project path="meta-sw-shm" name="SHM/qnx/meta-sw-shm" remote="shm-gerrit" revision="shm_0wk_0">
+        <copyfile src="classes/deploy_dir_android_shm.bbclass" dest="meta-qualcomm/meta-android-guest/classes/deploy_dir_android.bbclass"/>
+        <copyfile src="conf/machine/include/qnx7arm64.inc" dest="meta-qualcomm/meta-qnx/conf/machine/include/qnx7arm64.inc"/>
+        <copyfile src="conf/europe.conf" dest="meta-distro-common/conf/mirrors/europe.conf"/>
+        <copyfile src="conf/qnx7shm-hmi.conf" dest="meta-distro-common/conf/premirror/qnx7shm-hmi.conf"/>
+        <copyfile src="conf/qnx7shm-ux.conf" dest="meta-distro-common/conf/premirror/qnx7shm-ux.conf"/>
+    </project>
+    <!-- Sonarqube specific Layers -->
+    <project path="meta-sonarqube" name="SHM/qnx/meta-sonarqube" remote="shm-gerrit" revision="master"/>
+</manifest>

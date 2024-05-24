@@ -1,0 +1,2 @@
+@Library(['pipeline-global-library@aosp']) _
+aospRunPipeline()

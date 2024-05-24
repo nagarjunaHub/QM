@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <remote fetch="https://android-googlesource.cmo.conti.de/" name="aosp-mirror"/>
+  <remote fetch="ssh://buic-scm-fr.contiwan.com:29418" name="gerrit" review="https://buic-scm-fr.contiwan.com:8443/"/>
+  <remote fetch="ssh://git@github-vni.geo.conti.de/iip" name="iip"/>
+  <remote fetch="ssh://git@github.geo.conti.de/ISnT-IIP" name="isnt"/>
+  <remote fetch="ssh://git@github-vni.geo.conti.de/iip-oss" name="mirror"/>
+  <remote fetch="ssh://git@github-vni.geo.conti.de/sw-foundation-assets" name="origin"/>
+  <remote fetch="ssh://git@github-vni.geo.conti.de/supplier-qualcomm" name="qualcomm"/>
+  <remote fetch="ssh://git@github-vni.geo.conti.de/supplier-qualcomm" name="supplier-mirror"/>
+  
+  <default remote="origin"/>
+  
+  <project groups="qnx,linux,android,qssi,integration" name="build-scripts" revision="7f9bc916e7e35d94954889a539f4b644f2fd864e" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-asset-integration" revision="bb0958aee40027742570882efbae46d60276efe0" upstream="denali-4.1-int"/>
+  <project groups="qnx" name="meta-autosar-adaptive" revision="273daa65ba7541c997e17c5e0db863ece80e8e26" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-distro-common" revision="e83b032d417b0d1a0261dab74fb13ab355219ecf" upstream="denali-4.1-int"/>
+  <project groups="qnx" name="meta-gplv2" remote="mirror" revision="d2f8b5cdb285b72a4ed93450f6703ca27aa42e8a" upstream="kirkstone"/>
+  <project groups="qnx,linux" name="meta-java" remote="mirror" revision="2926885ebb4c3780789918e0d2ce5ee42cf115a5" upstream="kirkstone"/>
+  <project groups="qnx" name="meta-openembedded" remote="mirror" revision="278ec081a64e6a7679d6def550101158126cd935" upstream="kirkstone"/>
+  <project groups="qnx" name="meta-python2" remote="mirror" revision="f02882e2aa9279ca7becca8d0cedbffe88b5a253" upstream="kirkstone"/>
+  <project groups="qnx,linux" name="meta-qualcomm" revision="41ec8b5962a8be169c8fea17bb79b63f8ada934a" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-services-system" revision="c9773aae93417706638a488c3290be13ade1bddc" upstream="denali-4.1-int"/>
+  <project groups="qnx,linux" name="meta-services-ui" revision="ce83d80609dc21d2f15c670c33f9200040f3df17" upstream="denali-4.1-int"/>
+  <project groups="qnx" name="poky" remote="mirror" revision="65dafea22018052fe7b2e17e6e4d7eb754224d38" upstream="kirkstone"/>
+  <project groups="qnx" name="qnx_sdp" remote="iip" revision="f92d32ea024ad5ef2dc113f4df9ab98575b6204f" upstream="snapdragon-auto-hqx-4-5-6-0-r000044.1a"/>
+</manifest>

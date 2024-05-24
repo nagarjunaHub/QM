@@ -1,0 +1,24 @@
+server:
+  gerrit: t2k-gerrit.elektrobit.com
+  gerrit_port: 29418
+  artifactory: https://artifactory.elektrobit.com:443/artifactory/t2k_deliveries-releases-generic-denue/t2k_build_artifacts
+#Variant Project Specific Configuration
+project:
+  workspace: /ssd/jenkins/baseline_switch_b2
+  manifest_repo: T2K/QNX-manifest
+  baseline_branch: t2k_b2_0
+  manifest_file: t2k.xml
+  prefix_repo_mirror: T2K/qnx
+  config_repo: T2K/qnx/meta-sw-t2k
+  # self create or someone else (PO)
+  jira_ticket: T2KB1-13331
+  default_reviewers: quoc.nguyen@elektrobit.com
+# iip: platform from Conti
+iip:
+  manifest_repo: T2K/qnx/iip/manifests/denali
+  baseline_branch: 1.3-baseline
+  manifest_file: sw-platform-snapshot.xml
+  current_qnx_baseline: DN_01.03_20221605_1527_2098
+  next_qnx_baseline: DN_01.03_20222805_0518_2302
+  ac_image_repo: T2K/qnx/cds/sw.sys.tv2.meta-repo
+  ac_image_branch: master

@@ -1,0 +1,3 @@
+@Library(['pipeline-global-library@master']) _
+gSonarqube (projectConfig: 'eb/project/shm_config.yml')
+

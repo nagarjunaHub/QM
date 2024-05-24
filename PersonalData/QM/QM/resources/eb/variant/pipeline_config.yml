@@ -1,0 +1,34 @@
+#Variant Project Setup
+general:
+
+  defaultNode: QNX_71_BuildBot
+  node: QNX_71_BuildBot
+
+#Variant Job Specific Configuration
+job:
+  release:
+    deploy_root: /net/denue6nfs001/shm/flashfiles_shm
+    max_day_to_keep_release_build: 15
+    max_day_to_keep_test_build: 2
+    iip_release_dir: /net/denue6nfs001/shm/flashfiles_shm/iip_release_conti/
+    release_info_file: /net/denue6nfs001/shm/flashfiles_shm/.release_info
+    release_types: pi_snapshots weekly_snapshots nightly
+    package_release: build_name qnx aosp
+    package_release_nightly: qnx aosp 
+    package_cleanup: qnx aosp ac get_flash
+    send_to: SHM_Gerrit_Integration@elektrobit.com
+    artifactory_release: https://artifactory.elektrobit.com/ui/native/shm_deliveries-releases-generic-denue/snapshots/shm_0wk_0/
+    artifactory_release_name: shm_0wk_0_initial_loading.zip
+    release_table:
+      build_name:
+        release_dir: /net/denue6nfs001/shm/flashfiles_shm/customer_releases/
+        release_file: ""
+        snapshot_job: ""
+      qnx:
+        release_dir: /net/denue6nfs001/shm/flashfiles_shm/qnx_release/
+        release_file: initial_loading.zip, release_note_%s.log
+        snapshot_job: https://shm-jenkins.elektrobit.com/job/SHM-CI/job/qnx/job/nightly_multi_branch/job/shm_0wk_0/
+      aosp:
+        release_dir: /net/denue6nfs001/shm/flashfiles_shm/snapshots/
+        release_file: ""
+        snapshot_job: https://shm-jenkins.elektrobit.com/job/SHM-CI/job/aosp/job/shm_t_0_snapshot_pipeline/

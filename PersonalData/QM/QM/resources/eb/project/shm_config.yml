@@ -1,0 +1,603 @@
+# Project Custom Setup
+general:
+  projectName: shm
+  defaultNode: Linux_BuildBot
+  rootDir: /ssd/svc_shm_jenkins
+  releaseRootDir: /net/denue6nfs001/shm/flashfiles_shm
+  gerritHost: shm-gerrit.elektrobit.com
+  gerritPort: 29418
+  creds: svc_gerrit_shm
+  docker:
+    registry: artifactory.elektrobit.com/shm-releases-docker
+    image: oe
+    tag: devenv
+    dargs: --cap-add SYS_ADMIN --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME -v $HOME:$HOME -v /ssd:/ssd -v /net/:/net/
+  email:
+    defaultEmailSender: svc_shm_jenkins@elektrobit.com
+    defaultEmailReceiver: SHM_Gerrit_Integration@elektrobit.com
+    testingTeamReceiver: &testingTeamReceiver "MdMahfuzur.Rahman@elektrobit.com, Benjamin.Schaeffner@elektrobit.com, HasanAhmed.Tanveer@elektrobit.com"
+  baselineSubvolume: qnx_multi_branch_%s_baseline
+  versionTemplate: SHM_0WK_%s
+
+job:
+  verify_multi_branch:
+    variants: qnx7shm-hmi qnx7shm-ux
+    runNode:
+      qnx7shm-hmi:
+        deulm2hu055
+      qnx7shm-ux:
+        deulm2hu043
+    repo:
+      repoFile: shm.xml
+      repoReleaseFile: shm_devel.xml
+    jobConfig: &jobConfigTpl
+      timeOut: 14400
+      buildDiscarder:
+        daysToKeepStr: 7
+        numToKeepStr: 20
+        artifactDaysToKeepStr:
+        artifactNumToKeepStr:
+      trigger:
+        cron:
+        upstream: ''
+        gerrit:
+          triggerEvent: verify
+          silentMode: true
+          project:
+            name: (?i)^(SHM\/qnx\/meta-|SHM\/QNX-manifest).*$
+            branch: (?i)^(shm_0wk_0).*
+          commentAddedCommentContains: (?i)^(__retrigger__|__retrigger_clean__|__iip_int__|__iip_int_clean__).*
+          dynamicTriggerConfiguration: false
+          triggerConfigURL: ''
+      disableConcurrentBuilds: false
+      throttleJobProperty:
+        category:
+        maxConcurrentPerNode: 0
+        maxConcurrentTotal: 4
+        paramsToUseForLimit: ''
+        throttleEnabled: true
+        throttleOption: project
+    stages:
+      Prepare: &PrepareTpl
+        state: enabled
+        archiveArtifacts: '*.xml, *.log'
+        checkList:
+          latestPatchset: enabled
+          rebase: enabled
+          wipState: enabled
+          jira: enabled
+          dependsOn: enabled
+          isBuilt: disabled
+        runScript: |
+          rm -rf ./iipPreviousBaseline
+          if [ -d .repo/manifests ]; then
+            echo $(basename $(find .repo/manifests -name "DN_*.xml")) > iipPreviousBaseline
+          else
+            echo "None" > iipPreviousBaseline
+          fi
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gPrepare
+          qnx7shm-ux:
+            apiCall: gPrepare
+      Versioning: &VersioningTpl
+        state: enabled
+        changeLogTypes: devel
+        archiveArtifacts: '*.xml, *.log'
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gVersioning
+          qnx7shm-ux:
+            apiCall: gVersioning
+      Build: &BuildTpl
+        state: enabled
+        archiveArtifacts: '*.sh, *.log'
+        parallel:
+          qnx7shm-hmi:
+            qnxBuildTarget: qnx7shm-hmi
+            androidGuest: SHM_HMI_Android_Guest
+            incrementalPackages: qc-prebuilds qnx-sa8255p-bsp xbl-tz system-deployment flashmap
+            androidPrebuitPath: /net/denue6nfs001/shm/flashfiles_shm/devel/SHM_ANDROID_T_0_PREBUILT_DEVEL/shm_hmi-userdebug
+            androidPrebuitPathIIPInt: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_IIP_INT/shm_hmi-userdebug
+            docker:
+              dargs: >
+                --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME
+                -v $HOME:$HOME -v /net/:/net/ -v /ssd/jenkins/.ccache:/ssd/jenkins/.ccache
+                -w /ssd/jenkins/workdir -v !workingDir!:/ssd/jenkins/workdir
+            apiCall: pBuildQNX
+          qnx7shm-ux:
+            qnxBuildTarget: qnx7shm-ux
+            androidGuest: SHM_UX_Android_Guest
+            incrementalPackages: qc-prebuilds qnx-sa8255p-bsp xbl-tz system-deployment flashmap
+            androidPrebuitPath: /net/denue6nfs001/shm/flashfiles_shm/devel/SHM_ANDROID_T_0_PREBUILT_DEVEL/shm_ux-userdebug
+            androidPrebuitPathIIPInt: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_IIP_INT/shm_ux-userdebug
+            docker:
+              dargs: >
+                --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME
+                -v $HOME:$HOME -v /net/:/net/ -v /ssd/jenkins/.ccache:/ssd/jenkins/.ccache
+                -w /ssd/jenkins/workdir -v !workingDir!:/ssd/jenkins/workdir
+            apiCall: pBuildQNX
+      Deploy: &DeployTpl
+        state: enabled
+        errorException: false
+        parallel:
+          qnx7shm-hmi:
+            runScript: |
+              rm -rf deployRootDir
+              mkdir -p deployRootDir
+              #  mkdir -p deployRootDir/buildScripts
+              export BUILDDIR=workdir
+              cp -rf ${BUILDDIR}/tmp-distro-base-qnx/deploy/distro-base-qnx/images/qnx7shm-hmi/initial_loading.zip deployRootDir/
+              cp -rf *.xml release_note*.log deployRootDir/
+              #  cp -rf Script* deployRootDir/buildScripts/
+            apiCall: gScript
+          qnx7shm-ux:
+            runScript: |
+              rm -rf deployRootDir
+              mkdir -p deployRootDir
+              #  mkdir -p deployRootDir/buildScripts
+              export BUILDDIR=workdir
+              cp -rf ${BUILDDIR}/tmp-distro-base-qnx/deploy/distro-base-qnx/images/qnx7shm-ux/initial_loading.zip deployRootDir/
+              cp -rf *.xml release_note*.log deployRootDir/
+              #  cp -rf Script* deployRootDir/buildScripts/
+            apiCall: gScript
+      Test: &TestTpl
+        state: enabled
+        emailRecipient: *testingTeamReceiver
+        dtJobConfig:
+          wait: true
+          propagate: true
+          timeOut: 3600
+          params:
+            - TESTING_STAGE=T1
+            - SW_IMAGE_VERSION=!buildVersion!
+            - QNX_IMAGE_PATH=svc_shm_jenkins@!runNode!:!workingDir!/deployRootDir/initial_loading.zip
+            - BUILDBOT_NODE=!runNode!
+            - SOURCE_VOLUME=!workingDir!
+            - LUNCH_TARGET=!variant!
+        parallel:
+          qnx7shm-hmi:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+          qnx7shm-ux:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+      PublishWorkspace:
+        state: enabled
+        alwaysRelease: false
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gPublishWorkspace
+          qnx7shm-ux:
+            apiCall: gPublishWorkspace
+      Feedback: &FeedbackTpl
+        state: always
+        apiCall: gFeedback
+      CleanUp: &CleanUpAlways
+        state: always
+        alwaysClean: true
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gCleanUp
+          qnx7shm-ux:
+            apiCall: gCleanUp
+
+  getflash_multi_branch:
+    variants: qnx7shm-hmi qnx7shm-ux
+    runNode:
+      qnx7shm-hmi:
+        deulm2hu055
+      qnx7shm-ux:
+        deulm2hu043
+    repo:
+      repoFile: shm.xml
+      repoReleaseFile: shm_devel.xml
+    jobConfig:
+      timeOut: 14400
+      buildDiscarder:
+        daysToKeepStr: 7
+        numToKeepStr: 20
+        artifactDaysToKeepStr:
+        artifactNumToKeepStr:
+      trigger:
+        cron:
+        upstream: ''
+        gerrit:
+          triggerEvent: comment
+          silentMode: true
+          project:
+            name: (?i)^(SHM\/qnx\/meta-|SHM\/QNX-manifest).*$
+            branch: (?i)^(shm_0wk_0).*
+          commentAddedCommentContains: (?i)^(__get_flash__|__get_flash_clean__).*
+          dynamicTriggerConfiguration: false
+          triggerConfigURL: ''
+      disableConcurrentBuilds: false
+      throttleJobProperty:
+        category: 
+        maxConcurrentPerNode: 0
+        maxConcurrentTotal: 4
+        paramsToUseForLimit: ''
+        throttleEnabled: true
+        throttleOption: project
+    stages:
+      Prepare: *PrepareTpl
+      Versioning: *VersioningTpl
+      Build: *BuildTpl
+      Deploy: *DeployTpl
+      PublishArtifacts:
+        state: enabled
+        parallel:
+          qnx7shm-hmi:
+            runScript: |
+              releaseDir="!releaseRootDir!/get_flash/!buildVersion!/qnx7shm-hmi"
+              mkdir -p ${releaseDir}
+              cp -rf deployRootDir/* configMap.yaml ${releaseDir}/
+            apiCall: gScript
+          qnx7shm-ux:
+            runScript: |
+              releaseDir="!releaseRootDir!/get_flash/!buildVersion!/qnx7shm-ux"
+              mkdir -p ${releaseDir}
+              cp -rf deployRootDir/* configMap.yaml ${releaseDir}/
+            apiCall: gScript
+      Feedback: *FeedbackTpl
+      CleanUp: *CleanUpAlways
+
+  devel_multi_branch:
+    variants: qnx7shm-hmi qnx7shm-ux
+    runNode:
+      qnx7shm-hmi:
+        deulm2hu055
+      qnx7shm-ux:
+        deulm2hu043
+    repo:
+      repoFile: shm.xml
+      repoReleaseFile: shm_devel.xml
+    jobConfig:
+      timeOut: 14400
+      buildDiscarder:
+        daysToKeepStr: 7
+        numToKeepStr: 20
+        artifactDaysToKeepStr:
+        artifactNumToKeepStr:
+      trigger:
+        cron:
+        upstream: ''
+        gerrit:
+          triggerEvent: submit
+          silentMode: true
+          project:
+            name: (?i)^(SHM\/qnx\/meta-|SHM\/AOSP-manifest-release).*$
+            branch: (?i)^(shm_0wk_0|shm_t_0_master).*
+          commentAddedCommentContains: (?i)^(__get_flash__|__get_flash_clean__|__retrigger__|__retrigger_clean__|__iip_int__|__iip_int_clean__).*
+          dynamicTriggerConfiguration: false
+          triggerConfigURL: ''
+      disableConcurrentBuilds: false
+      throttleJobProperty:
+        category:
+        maxConcurrentPerNode: 0
+        maxConcurrentTotal: 4
+        paramsToUseForLimit: ''
+        throttleEnabled: true
+        throttleOption: project
+    stages:
+      Prepare: *PrepareTpl
+      Versioning: *VersioningTpl
+      Build: *BuildTpl
+      Deploy: *DeployTpl
+      Test:
+        state: enabled
+        emailRecipient: *testingTeamReceiver
+        dtJobConfig:
+          wait: true
+          propagate: true
+          timeOut: 3600
+          params:
+            - TESTING_STAGE=T2
+            - SW_IMAGE_VERSION=!buildVersion!
+            - QNX_IMAGE_PATH=svc_shm_jenkins@!runNode!:!workingDir!/deployRootDir/initial_loading.zip
+            - BUILDBOT_NODE=!runNode!
+            - SOURCE_VOLUME=!workingDir!
+            - LUNCH_TARGET=!variant!
+        parallel:
+          qnx7shm-hmi:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+          qnx7shm-ux:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+      PublishManifests: &PublishManifestsTpl
+        state: enabled
+        # Supported variables: !buildVersion!,!workingDir!,!runNode!,!variant!
+        errorException: false
+        runScript: |
+          releaseBranch='shm_0wk_0'
+          git --git-dir=.repo/manifests/.git --work-tree=.repo/manifests fetch origin ${releaseBranch}
+          git --git-dir=.repo/manifests/.git --work-tree=.repo/manifests reset --hard origin/${releaseBranch}
+          cp -rf shm_!pipelineType!.xml .repo/manifests/shm_!pipelineType!.xml
+          pushd .repo/manifests &> /dev/null
+          git add --all && git commit -m "!pipelineType!: Release !buildVersion!"
+          git push origin HEAD:refs/heads/${releaseBranch}
+          git tag -a !buildVersion! -m "!buildVersion!"
+          git push origin !buildVersion!
+          git tag -f !pipelineType!
+          git push -f origin !pipelineType!
+          popd &> /dev/null
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gScript
+          qnx7shm-ux:
+            apiCall: gScript
+      PublishWorkspace: &PublishWorkspaceTpl
+        state: enabled
+        alwaysRelease: true
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gPublishWorkspace
+          qnx7shm-ux:
+            apiCall: gPublishWorkspace
+      TriggerSnapshot:
+        state: enabled
+        snapshotJob: SHM-CI/qnx/nightly_multi_branch/shm_0wk_0
+        apiCall: pTriggerSnapshot
+      Feedback: *FeedbackTpl
+      CleanUp: &CleanUpOnSuccess
+        state: enabled
+        alwaysClean: false
+        parallel:
+          qnx7shm-hmi:
+            apiCall: gCleanUp
+          qnx7shm-ux:
+            apiCall: gCleanUp
+
+  nightly_multi_branch:
+    variants: qnx7shm-hmi qnx7shm-ux
+    runNode:
+      qnx7shm-hmi:
+        deulm2hu055
+      qnx7shm-ux:
+        deulm2hu043
+    repo:
+      repoFile: shm_devel.xml
+      repoReleaseFile: shm_nightly.xml
+      repoBranch: shm_0wk_0
+    jobConfig:
+      timeOut: 14400
+      buildDiscarder:
+        daysToKeepStr: 7
+        numToKeepStr: 20
+        artifactDaysToKeepStr:
+        artifactNumToKeepStr:
+      disableConcurrentBuilds: true
+      throttleJobProperty:
+        maxConcurrentTotal: 1
+    stages:
+      Prepare: *PrepareTpl
+      Versioning:
+        state: enabled
+        changeLogTypes: nightly weekly_snapshots pi_snapshots
+        archiveArtifacts: '*.xml, *.log'
+        parallel:
+          qnx7shm-qam8255:
+            apiCall: gVersioning
+          qnx7shm-hmi:
+            apiCall: gVersioning
+          qnx7shm-ux:
+            apiCall: gVersioning
+      Build:
+        state: enabled
+        archiveArtifacts: '*.sh, *.log'
+        parallel:
+          qnx7shm-hmi:
+            qnxBuildTarget: qnx7shm-hmi
+            androidGuest: SHM_HMI_Android_Guest
+            incrementalPackages: qc-prebuilds qnx-sa8255p-bsp xbl-tz system-deployment flashmap
+            androidPrebuitPath: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_SNAPSHOT/shm_hmi-userdebug
+            androidPrebuitPathIIPInt: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_IIP_INT/shm_hmi-userdebug
+            docker:
+              dargs: >
+                --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME
+                -v $HOME:$HOME -v /net/:/net/ -v /ssd/jenkins/.ccache:/ssd/jenkins/.ccache
+                -w /ssd/jenkins/workdir -v !workingDir!:/ssd/jenkins/workdir
+            apiCall: pBuildQNX
+          qnx7shm-ux:
+            qnxBuildTarget: qnx7shm-ux
+            androidGuest: SHM_UX_Android_Guest
+            incrementalPackages: qc-prebuilds qnx-sa8255p-bsp xbl-tz system-deployment flashmap
+            androidPrebuitPath: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_SNAPSHOT/shm_ux-userdebug
+            androidPrebuitPathIIPInt: /net/denue6nfs001/shm/flashfiles_shm/snapshots/SHM_ANDROID_T_0_PREBUILT_IIP_INT/shm_hmi-userdebug
+            docker:
+              dargs: >
+                --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME
+                -v $HOME:$HOME -v /net/:/net/ -v /ssd/jenkins/.ccache:/ssd/jenkins/.ccache
+                -w /ssd/jenkins/workdir -v !workingDir!:/ssd/jenkins/workdir
+            apiCall: pBuildQNX
+      Deploy: *DeployTpl
+      Test:
+        state: enabled
+        emailRecipient: *testingTeamReceiver
+        dtJobConfig:
+          wait: true
+          propagate: true
+          timeOut: 7200
+          params:
+            - TESTING_STAGE=T3
+            - SW_IMAGE_VERSION=!buildVersion!
+            - QNX_IMAGE_PATH=svc_shm_jenkins@!runNode!:!workingDir!/deployRootDir/initial_loading.zip
+            - BUILDBOT_NODE=!runNode!
+            - SOURCE_VOLUME=!workingDir!
+            - LUNCH_TARGET=!variant!
+        parallel:
+          qnx7shm-hmi:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+          qnx7shm-ux:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+      PublishArtifacts:
+        state: enabled
+        parallel:
+          qnx7shm-hmi:
+            runScript: |
+              releaseRoot="!releaseRootDir!/qnx_release"
+              releaseRootAOSP="!releaseRootDir!/snapshots"
+              artifactoryRoot="https://artifactory.elektrobit.com:443/artifactory/shm_deliveries-releases-generic/snapshots/shm_0wk_0"
+              releaseDir="${releaseRoot}/!buildVersion!/qnx7shm-hmi"
+              # Copying initial_loading.zip to ULM NFS to mitigate network issues, this can be removed after network issues are fixed
+              ulmReleaseDir="/net/deulmhustorage/flashfiles_t2k/shm/qnx_release/!buildVersion!/qnx7shm-hmi"
+              mkdir -p ${ulmReleaseDir}
+              cp -rf deployRootDir/* ${ulmReleaseDir}/
+              pushd /net/deulmhustorage/flashfiles_t2k/shm/qnx_release &>/dev/null
+              # Delete previous snapshot release build
+              oldRelease=$(readlink latest)
+              if [[ ! -z ${oldRelease} && ${oldRelease} != !buildVersion! ]]; then
+              rm -rf ${oldRelease}
+              fi
+              ln -sfT !buildVersion! latest
+              popd &>/dev/null
+              # Copy to Noris NFS share
+              mkdir -p ${releaseDir}
+              cp -rf deployRootDir/* ${releaseDir}/
+              pushd ${releaseRoot} &>/dev/null
+              ln -sfT !buildVersion! latest
+              popd &>/dev/null
+              pushd ${releaseRootAOSP} &>/dev/null
+              ln -sfT $(basename $(readlink -f latest_preint)) latest
+              popd &>/dev/null
+              time curl -X PUT -n --upload-file ${releaseDir}/initial_loading.zip ${artifactoryRoot}/!variant!_initial_loading.zip
+              echo "Uploaded from: ${releaseDir}/initial_loading.zip" > ${releaseDir}/!variant!_initial_loading.metadata
+              time curl -X PUT -n --upload-file ${releaseDir}/!variant!_initial_loading.metadata ${artifactoryRoot}/!variant!_initial_loading.metadata
+            apiCall: gScript
+          qnx7shm-ux:
+            runScript: |
+              releaseRoot="!releaseRootDir!/qnx_release"
+              releaseRootAOSP="!releaseRootDir!/snapshots"
+              artifactoryRoot="https://artifactory.elektrobit.com:443/artifactory/shm_deliveries-releases-generic/snapshots/shm_0wk_0"
+              releaseDir="${releaseRoot}/!buildVersion!/qnx7shm-ux"
+              # Copying initial_loading.zip to ULM NFS to mitigate network issues, this can be removed after network issues are fixed
+              ulmReleaseDir="/net/deulmhustorage/flashfiles_t2k/shm/qnx_release/!buildVersion!/qnx7shm-ux"
+              mkdir -p ${ulmReleaseDir}
+              cp -rf deployRootDir/* ${ulmReleaseDir}/
+              pushd /net/deulmhustorage/flashfiles_t2k/shm/qnx_release &>/dev/null
+              # Delete previous snapshot release build
+              oldRelease=$(readlink latest)
+              if [[ ! -z ${oldRelease} && ${oldRelease} != !buildVersion! ]]; then
+              rm -rf ${oldRelease}
+              fi
+              ln -sfT !buildVersion! latest
+              popd &>/dev/null
+              # Copy to Noris NFS share
+              mkdir -p ${releaseDir}
+              cp -rf deployRootDir/* ${releaseDir}/
+              pushd ${releaseRoot} &>/dev/null
+              ln -sfT !buildVersion! latest
+              popd &>/dev/null
+              pushd ${releaseRootAOSP} &>/dev/null
+              ln -sfT $(basename $(readlink -f latest_preint)) latest
+              popd &>/dev/null
+              time curl -X PUT -n --upload-file ${releaseDir}/initial_loading.zip ${artifactoryRoot}/!variant!_initial_loading.zip
+              echo "Uploaded from: ${releaseDir}/initial_loading.zip" > ${releaseDir}/!variant!_initial_loading.metadata
+              time curl -X PUT -n --upload-file ${releaseDir}/!variant!_initial_loading.metadata ${artifactoryRoot}/!variant!_initial_loading.metadata
+            apiCall: gScript
+      PublishManifests: *PublishManifestsTpl
+      PublishWorkspace: *PublishWorkspaceTpl
+      SonarQube:
+        state: enabled
+        dtJobConfig:
+          wait: false
+          propagate: false
+          params:
+            - SONAR_SOURCE_VOLUME=!workingDir!
+            - SNAPSHOT_NAME=!buildVersion!
+            - STACK_TARGET_LABEL=!runNode!
+            - GERRIT_BRANCH=shm_0wk_0
+            - BUILD_TARGET=!variant!
+        parallel:
+          qnx7shm-hmi:
+            dtJobs:
+              sequential:
+                SHM-CI/qnx/sonarqube_multi_branch/shm_0wk_0:
+                  state: enabled
+            apiCall: gTrigger
+      TriggerRelease:
+        state: enabled
+        dtJobConfig:
+          wait: false
+        dtJobs:
+          sequential:
+            SHM-CI/release/release_customer_0wk:
+              state: enabled
+        apiCall: gTrigger
+      PostReleaseTest:
+        state: enabled
+        emailRecipient: *testingTeamReceiver
+        dtJobConfig:
+          wait: false
+          propagate: false
+          params:
+            - TESTING_STAGE=T4
+            - SW_IMAGE_VERSION=!buildVersion!
+            - QNX_IMAGE_PATH=/net/deulmhustorage/flashfiles_t2k/shm/qnx_release/!buildVersion!/!variant!/
+            - LUNCH_TARGET=!variant!
+        parallel:
+          qnx7shm-hmi:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+          qnx7shm-ux:
+            dtJobs:
+              sequential:
+                SHM-CT/QNX-CT-Chain/QNX-Continuous-Testing-Pipeline/shm_t_0:
+                  state: enabled
+            apiCall: gTrigger
+      GerritNotification:
+        state: enabled
+        aospSharedrive: /net/denue6nfs001/shm/flashfiles_shm/snapshots
+        releaseRoot: /net/denue6nfs001/shm/flashfiles_shm/qnx_release
+        repoReleaseFile: shm_nightly.xml
+        apiCall: pGerritNotification
+      # PolarionRunner:
+      #   state: enabled
+      #   docker:
+      #     registry: artifactory.elektrobit.com/t2k-releases-docker
+      #     image: ci-utilities
+      #     tag: devenv
+      #     dargs: --cap-add SYS_ADMIN --pull=always -v /etc/ssl/:/etc/ssl -v /usr/local/share/ca-certificates/:/usr/local/share/ca-certificates/ -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME -v $HOME:$HOME -v /ssd:/ssd -v /net/:/net/
+      #   archiveArtifacts: '*.sh, *.log'
+      #   runScript: |
+      #     if [ -d PolarionScripts/.git ]; then
+      #     git --git-dir=PolarionScripts/.git --work-tree=PolarionScripts clean -dfx
+      #       git --git-dir=PolarionScripts/.git --work-tree=PolarionScripts pull origin master
+      #     else
+      #       git clone --depth 1 ssh://gerrit-ulm:29418/testing/polarion/scripts -b master PolarionScripts
+      #     fi
+      #     python2 PolarionScripts/polarion_testrun_importer/release_wi_sync.py \
+      #       --project "jupiter_hwVariant_B2" \
+      #       --release "!buildVersion!" \
+      #       --releaseType "snapshot" \
+      #       --cluster "mainline" \
+      #       --region "all" \
+      #       --brand "sony" \
+      #       --status "buildFinished"
+      #   apiCall: gScript
+      Feedback: *FeedbackTpl
+      CleanUp: *CleanUpOnSuccess

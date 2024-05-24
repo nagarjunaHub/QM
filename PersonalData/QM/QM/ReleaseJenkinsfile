@@ -1,0 +1,3 @@
+@Library(['pipeline-global-library@a3a334261eda55d5f4c104a46d442e62044755b7']) _
+
+runRelease()

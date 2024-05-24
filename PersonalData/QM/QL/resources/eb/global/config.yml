@@ -1,0 +1,16 @@
+#Global Shared Setup
+general:
+  # clear all current queued builds for the job, and run only the current one.
+  clearJobQueue: False
+  defaultNode: Linux_BuildBot
+  fetchThreads: 4
+  rootDir: /ssd/jenkins
+  # timeOut in Seconds (8 hours)
+  timeOut: 28800
+  # This will be used if projects don't specify docker image in project's configs
+  archiveArtifacts: '*.sh'
+  docker: &globalDocker
+    registry: artifactory.elektrobit.com/t2k-releases-docker
+    image: oe
+    tag: devenv
+    dargs: --cap-add SYS_ADMIN --pull=always -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME -v $HOME:$HOME -v /ssd:/ssd -v /net/:/net/

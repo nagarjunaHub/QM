@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+   <remote fetch="ssh://shm-gerrit.elektrobit.com:29418/" name="shm-gerrit" review="" />
+   <include name="continental-release/DN_04.01_20231107_1224_2489.xml" />
+   <include name="shm_apps.xml" />
+
+<!-- BEGIN:Elektrobit Repositories should be included after this line -->
+   <project name="SHM/AOSP-manifest" path=".AOSP-manifest" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/continental/CAAF/vendor/elektrobit/interfaces/gnss" path="vendor/elektrobit/interfaces/gnss" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/continental/CAAF/vendor/elektrobit/interfaces/hidl-release" path="vendor/elektrobit/interfaces/hidl-release" revision="shm_t_0" remote="shm-gerrit">
+      <linkfile dest="vendor/elektrobit/interfaces/Android.bp" src="vendor_elektrobit_interfaces_Android.bp" />
+   </project>
+   <project name="SHM/elektrobit/AmplifierController" path="vendor/elektrobit/modules/AmplifierController" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/CameraMediaServer" path="vendor/elektrobit/modules/EBcameraMediaServer/ebcms_source_lib/CameraMediaServer" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/ThemeManager" path="vendor/elektrobit/modules/ThemeManager" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/ThemeManagerOverlays" path="vendor/elektrobit/modules/ThemeManagerOverlays" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/automotive/someip-vhal-properties" path="vendor/continental/interfaces/automotive/vehicle/1.0/someip-vhal-properties" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/device/common" path="device/elektrobit/common" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/device/shm_hmi" path="device/elektrobit/shm_hmi" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/device/shm_qam8255" path="device/elektrobit/shm_qam8255" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/device/shm_ux" path="device/elektrobit/shm_ux" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/modules/broadcastradio-hal" path="vendor/elektrobit/modules/broadcastradio-hal" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/network_config" path="vendor/elektrobit/modules/network_config" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/testing/example/java_test" path="vendor/elektrobit/testing/example/java_test" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/testing/example/native_test" path="vendor/elektrobit/testing/example/native_test" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/elektrobit/testing/productconfig" path="vendor/elektrobit/testing/productconfig" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/alpine" path="vendor/alpine" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/elektrobit/interfaces/EBcameraMediaServer" path="vendor/elektrobit/interfaces/EBcameraMediaServer" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/elektrobit/interfaces/amplifiercontrol" path="vendor/elektrobit/interfaces/amplifiercontrol" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/elektrobit/modules/EBCameralib" path="vendor/elektrobit/modules/EBCameralib" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/elektrobit/modules/EBcameraMediaServer" path="vendor/elektrobit/modules/EBcameraMediaServer" revision="shm_t_0" remote="shm-gerrit" />
+   <project name="SHM/vendor/elektrobit/modules/automotive" path="vendor/elektrobit/modules/automotive" revision="shm_t_0" remote="shm-gerrit" />
+<!-- END:Elektrobit Repositories -->
+
+<!-- BEGIN:Upstream Repositories should be included after this line -->
+   <remove-project name="kernel/msm-5.15" />
+   <project name="SHM/continental/kernel/msm-5.15" path="kernel_platform/msm-kernel" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="sw-android-device-common-qualcomm" />
+   <project name="SHM/continental/sw-android-device-common-qualcomm" path="device/continental/common-qualcomm" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="sw-android-device-denali-4" />
+   <project name="SHM/continental/sw-android-device-denali-4" path="device/continental/denali" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="sw-android-devicetree" />
+   <project name="SHM/continental/sw-android-devicetree" path="vendor/continental/sw-android-devicetree" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="hal-vehicle-dispatcher" />
+   <project name="SHM/continental/hal-vehicle-dispatcher" path="vendor/continental/interfaces/automotive/vehicle/1.0/VehicleHalDispatcher" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="hal-vehicle-product-extension" />
+   <project name="SHM/continental/hal-vehicle-product-extension" path="vendor/continental/interfaces/automotive/vehicle/1.0/prod-vhal-extension" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="hal-vehicle-signal-service" />
+   <project name="SHM/continental/hal-vehicle-signal-service" path="vendor/continental/interfaces/automotive/vehicle/1.0/VehicleProperties" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/frameworks/base" />
+   <project name="SHM/continental/platform/frameworks/base" path="frameworks/base" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/packages/apps/Car/SystemUI" />
+   <project name="SHM/continental/platform/packages/apps/Car/SystemUI" path="packages/apps/Car/SystemUI" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/vendor/qcom/opensource/agm" />
+   <project name="SHM/continental/platform/vendor/qcom/opensource/agm" path="vendor/qcom/opensource/agm" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/vendor/qcom/opensource/arpal-lx" />
+   <project name="SHM/continental/platform/vendor/qcom/opensource/arpal-lx" path="vendor/qcom/opensource/pal" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/hardware/qcom/audio-ar" />
+   <project name="SHM/continental/platform/hardware/qcom/audio-ar" path="vendor/qcom/opensource/audio-hal-ar/primary-hal" revision="shm_t_0" remote="shm-gerrit">
+     <linkfile dest="vendor/qcom/defs/product-defs/vendor/audio_ar_vendor_product.mk" src="configs/audio_ar_vendor_product.mk" />
+   </project>
+   <remove-project name="platform/packages/services/Car" />
+   <project name="SHM/continental/platform/packages/services/Car" path="packages/services/Car" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/packages/apps/Car/Settings" />
+   <project name="SHM/continental/platform/packages/apps/Car/Settings" path="packages/apps/Car/Settings" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/packages/modules/Connectivity" />
+   <project name="SHM/continental/platform/packages/modules/Connectivity" path="packages/modules/Connectivity" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/webrtc" />
+   <project name="SHM/continental/platform/external/webrtc" path="external/webrtc" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/usrsctp" />
+   <project name="SHM/continental/platform/external/usrsctp" path="external/usrsctp" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/rnnoise" />
+   <project name="SHM/continental/platform/external/rnnoise" path="external/rnnoise" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/pffft" />
+   <project name="SHM/continental/platform/external/pffft" path="external/pffft" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/libsrtp2" />
+   <project name="SHM/continental/platform/external/libsrtp2" path="external/libsrtp2" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="vendor-qcom-proprietary" />
+   <project name="SHM/continental/vendor-qcom-proprietary" path="vendor/qcom/proprietary" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/packages/modules/Bluetooth" />
+   <project name="SHM/continental/platform/packages/modules/Bluetooth" path="packages/modules/Bluetooth" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="sw-android-device-common" />
+   <project name="SHM/continental/sw-android-device-common" path="device/continental/common" revision="shm_t_0" remote="shm-gerrit" />
+   <remove-project name="platform/external/robolectric-shadows" />
+   <project name="SHM/continental/platform/external/robolectric-shadows" path="external/robolectric-shadows" revision="shm_t_0" remote="shm-gerrit" />
+<!-- END:Upstream Repositories -->
+
+<!-- BEGIN:Other Repositories should be included after this line -->
+   <project name="SHM/audiokinetic/wwise-audio-hal" path="vendor/audiokinetic/modules/wwise-audio-hal" revision="shm_t_0" remote="shm-gerrit" />
+<!-- END:Other Repositories -->
+</manifest>

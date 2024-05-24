@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+<!-- BEGIN:Elektrobit Repositories should be included after this line -->
+   <project clone-depth="1" name="SHM/elektrobit/BasicNavigation/prebuilts" path="vendor/SHM/elektrobit/BasicNavigation/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/ContentBrowser/prebuilts" path="vendor/SHM/elektrobit/ContentBrowser/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/Dashcam/prebuilts" path="vendor/SHM/elektrobit/Dashcam/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/EBClusterRichUI/prebuilts" path="vendor/SHM/elektrobit/EBClusterRichUI/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/Home/prebuilts" path="vendor/SHM/elektrobit/Home/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/HomeRse/prebuilts" path="vendor/SHM/elektrobit/HomeRse/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/HomeTechbuck/prebuilts" path="vendor/SHM/elektrobit/HomeTechbuck/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/Navigation/prebuilts" path="vendor/SHM/elektrobit/Navigation/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/Settings/prebuilts" path="vendor/SHM/elektrobit/Settings/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/ThemingEngineStore/prebuilts" path="vendor/SHM/elektrobit/ThemingEngineStore/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/UiComponentsShowcase/prebuilts" path="vendor/SHM/elektrobit/UiComponentsShowcase/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/elektrobit/WindowSdkShowcase/prebuilts" path="vendor/SHM/elektrobit/WindowSdkShowcase/prebuilts" revision="shm_t_0" remote="shm-gerrit" />
+<!-- END:Elektrobit Repositories -->
+
+<!-- BEGIN:Upstream Repositories should be included after this line -->
+
+<!-- END:Upstream Repositories -->
+
+<!-- BEGIN:Other Repositories should be included after this line -->
+   <project clone-depth="1" name="SHM/sphe/prebuilts/RideVue" path="vendor/SHM/sphe/prebuilts/RideVue" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/ottera/prebuilts/OTTera" path="vendor/SHM/ottera/prebuilts/OTTera" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/crunchyroll/prebuilts/CrunchyRoll" path="vendor/SHM/crunchyroll/prebuilts/CrunchyRoll" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/tunein/prebuilts/TuneIn" path="vendor/SHM/tunein/prebuilts/TuneIn" revision="shm_t_0" remote="shm-gerrit" />
+   <project clone-depth="1" name="SHM/stingray/prebuilts/Stringray" path="vendor/SHM/stingray/prebuilts/Stringray" revision="shm_t_0" remote="shm-gerrit" />
+<!-- END:Other Repositories -->
+</manifest>

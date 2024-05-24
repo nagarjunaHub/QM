@@ -1,0 +1,3 @@
+@Library(['pipeline-global-library@master']) _
+
+gPipeline (projectConfig: 'eb/project/shm_config.yml')

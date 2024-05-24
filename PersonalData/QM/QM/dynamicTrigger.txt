@@ -1,0 +1,3 @@
+p=SHM/qnx/meta-sw-shm
+b~^(master|shm_0wk_).*$
+t~^(?!bundle_).*$

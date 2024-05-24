@@ -1,0 +1,265 @@
+#Global Shared Setup
+general:
+  # clear all current queued builds for the job, and run only the current one.
+  clearJobQueue: False
+  defaultNode: Linux_BuildBot
+  fetchThreads: 4
+  rootDir: /ssd/jenkins
+  # timeOut in Seconds (8 hours)
+  timeOut: 28800
+  # This will be used if projects don't specify docker image in project's configs
+  archiveArtifacts: '*.sh'
+  docker: &globalDocker
+    registry: artifactory.elektrobit.com/t2k-releases-docker
+    image: oe
+    tag: devenv
+    dargs: -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME -v $HOME:$HOME -v /ssd:/ssd -v /net/:/net/
+
+job:
+  #Example with explanation
+  # Support up to 2 nested stages
+  # Sub-Stages will be run in parallel, use failFast when one of the parallel stage fails.
+  # state: enabled => to enable or disable a stage, or simply remove it. 
+  # apiCall: xxx => mention the api here in 'xxx', default api could also be used which provided by global shared library.
+  verify_multi_branch_qnx_t2k_example: 
+    # If not mentioned, will use projectName as variant
+    variants: t2k t2k_cf
+    versionTemplate: T2K_B2_%s
+    # node will be used for this job, can use either and only labels or node names, separate by space.
+    # Supported 2 types: Nodes define for each variant or all supported nodes at one go.
+    # runNode: deulm2hu032 deulm2hu033 deulm2hu043
+    runNode:
+      t2k: deulm2hu033
+      t2k_cf: deulm2hu033
+    # Every job is using this templaplaygroundte with gAPis, need Linux_BuildBotto provide a valid docker image, like below.
+    # Otherwise, use project's own api or default global docker image will be used
+    docker:
+      registry: artifactory.elektrobit.com/t2k-releases-docker
+      image: oe
+      tag: devenv.2022-07-13.143610
+      dargs: -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME -v $HOME:$HOME -v /ssd:/ssd -v /net/:/net/
+    # timeOut in minutes, if not used, 8 hours will be default
+    jobConfig:
+      # time out in 4 hours, 14400 seconds
+      timeOut: 14400
+      buildDiscarder:
+        daysToKeepStr: 7
+        numToKeepStr: 20
+        artifactDaysToKeepStr:
+        artifactNumToKeepStr:
+      # Trigger Config by Gerrit Trigger Plugin hasn't been supported yet, still need to be done via job config's UI
+      trigger:
+        # Periodically scheduled timer (Eg: H(30-35) 0 * * 1-6), should be used only by Nightly Build Concept, if not used leave empty
+        cron:
+        # Multiple upstream jobs need to separate by comma ','
+        upstream: ''
+        gerrit:
+          silentMode: true
+          # Only 1 particular repo will be supported by now, if you have more, use the regex or dynamic trigger.
+          project:
+            name:
+            branch: 
+          # triggerEvent can choose 2 Preset Profiles: verify or submit
+          # - verify: 
+          #     - triggered on new patchset creation (excludeDrafts,excludePrivateState,excludeWipState)
+          #     - triggered on Draft-Published-Event, Change-Restored-Event 
+          #     - when this is chosen, concurrent build will be disabled by default
+          # - submit: 
+          #     - triggered on new commit merged.
+          triggerEvent: verify
+          # If you want to have trigger on comment added event, add the comment pattern below, should be used in verification matters
+          commentAddedCommentContains: (?i)^(__get_flash__|__get_flash_clean__|__retrigger__|__retrigger_clean__).*
+          dynamicTriggerConfiguration: false
+          triggerConfigURL: ''
+      disableConcurrentBuilds: true
+      throttleJobProperty:
+        category: 
+        maxConcurrentPerNode: 0
+        maxConcurrentTotal: 4
+        paramsToUseForLimit: ''
+        throttleEnabled: true
+        # Either project or category
+        throttleOption: project
+
+    stages:
+      # gXxxxx: g stands for global, and provided by global shared library.
+      # Currently, supported Apis in global shared library are: gPrepare gBuild gDeploy gTest gPublish gFeedback
+      # To override gApi, just change the name and the apiCall to yours.
+      # To append gApi, symply add more stages like: pPrepare (project Prepare), post-Prepare or pre-Build, or any name
+      # Every job is using this template with gAPis, need to provide a valid manifest entry, like below. Otherwise, use project's own api
+      # Working directory will follow this pattern: rootDir + jobname + manifest-branch-name + variant + buildnumber
+      Prepare:
+        state: enabled
+        archiveArtifacts: '*.xml, *.log'
+        cloneSubvolume: devel_example_multi_branch_%s_baseline
+        checkList:
+          latestPatchset: enabled
+          rebase: enabled
+          wipState: enabled
+          jira: enabled
+          dependsOn: enabled
+          isBuilt: disabled
+        parallel:
+          t2k:
+            # use keyword 'repo' for project works with repo tool, use 'git' for project works with 'git' tool
+            repo:
+              repoFile: t2k_devel_t2k.xml
+              repoReleaseFile: t2k_devel_t2k.xml
+            # Multi Apis can be called at same time parallelly, separated by comma ','
+            # By default, these Apis in parallel, will be fail-fast mode.
+            apiCall: gPrepare
+          t2k_cf:
+            repo:
+              repoFile: t2k_devel_t2k_cf.xml
+              repoReleaseFile: t2k_devel_t2k_cf.xml
+            apiCall: gPrepare
+      Versioning:
+        state: enabled
+        archiveArtifacts: '*.xml, *.log'
+        parallel:
+          t2k:
+            repo:
+              repoFile: t2k_devel_t2k.xml
+              repoReleaseFile: t2k_devel_t2k.xml
+            apiCall: gVersioning
+          t2k_cf:
+            repo:
+              repoFile: t2k_devel_t2k_cf.xml
+              repoReleaseFile: t2k_devel_t2k_cf.xml
+            apiCall: gVersioning
+      Build:
+        state: enabled
+        archiveArtifacts: '*.log'
+        docker:
+          dargs: >
+            -u $(id -u):$(id -g) -e USER_NAME=$(id -un) -e GROUP_NAME=$(id -gn) -e HOME 
+            -v $HOME:$HOME -v /net/:/net/ -v /ssd/jenkins/.ccache:/ssd/jenkins/.ccache 
+            -w /ssd/jenkins/workdir -v !workingDir!:/ssd/jenkins/workdir
+        # script to be run
+        runScript: |
+          cd /ssd/jenkins/workdir
+          git --git-dir=.aosp-manifest-release/.git remote update &>/dev/null
+          export AOSP_BASELINE="\$(git --git-dir=.aosp-manifest-release/.git describe --tags || true)"
+          ./build/scripts/setup_buildenv.py -d iip-core -b ./outdir -m qnx7pegasus1 -a meta-sw-t2k
+          source poky/oe-init-build-env ./outdir
+          export CAAF_PREBUILDS_PATH="/net/deulmhustorage/flashfiles_t2k/t2k_b2/devel/T2K_ANDROID_Q_0_PREBUILT_DEVEL"
+          export CAAF_PREBUILDS_FILE="prebuilts.tar.gz"
+          export BUILD_VERSION="QNX:!buildVersion!###AOSP:\${AOSP_BASELINE}"
+          export BASED_ON="DN_01.03_20221605_1527_2098"
+          export ENV_VARS_EXPORT="BUILD_NUMBER JOB_NAME BUILD_VERSION BASED_ON PYTHONDONTWRITEBYTECODE DOXYGEN_DOCUMENTATION QUALITY_DASHBOARD CAAF_PREBUILDS_PATH CAAF_PREBUILDS_FILE "
+          export BB_ENV_EXTRAWHITE="\${BB_ENV_EXTRAWHITE} \${ENV_VARS_EXPORT}"
+          export QUALITY_DASHBOARD=true
+          bitbake iip-core-image
+          bitbake initial-loading
+        parallel:
+          t2k:
+            apiCall: gScript
+          t2k_cf:
+            apiCall: gScript
+      Deploy:
+        state: enabled
+        # Goal for this stage would be collecting all release artifacts, make it ready and accessible in workspace for latter stages
+        # List of all commands need to be run, to collect artifacts to deployRootDir
+        runScript: |
+          mkdir -p deployRootDir
+          cp -rf outdir/tmp-distro-iip-core/deploy/distro-iip-core/images/qnx7pegasus1/initial_loading.zip deployRootDir/
+          cp -rf outdir/tmp-distro-iip-core/deploy/software-loading deployRootDir/
+          cp -rf *.xml deployRootDir/
+        parallel:
+          t2k:
+            apiCall: gScript
+          t2k_cf:
+            apiCall: gScript
+      Test:
+         # state: enabled/disabled/always (always: ignore status of previous stages, always run. if not used, this stage will not run if previous stages failed.) 
+        state: enabled
+        dtJobConfig:
+          wait: true
+          propagate: true
+          timeOut: 200
+          params:
+            - TESTING_STAGE=T1
+            - BUILDBOT_NODE=!runNode!
+            - ANDROID_IMAGE_PATH=jenkins@!runNode!:!workingDir!/deployRootDir
+            - QNX_IMAGE_PATH=jenkins@!runNode!:!workingDir!/deployRootDir/initial_loading.zip
+        parallel:
+          t2k:
+            # dtJobs is MUST-HAVE keyword here in testing stage
+            # Two or more test jobs MUST locate under 'parallel' or 'sequential' block. Single job is not required
+            dtJobs:
+              parallel:
+                T2K-PT/T2K-PT-CI/qnx/playground/downstream:
+                  state: enabled
+                T2K-PT/T2K-PT-CI/qnx/playground/downstream2:
+                  state: enabled
+            apiCall: gTest
+          t2k_cf:
+            dtJobs:
+              sequential:
+                T2K-PT/T2K-PT-CI/qnx/playground/downstream:
+                  state: enabled
+                T2K-PT/T2K-PT-CI/qnx/playground/downstream2:
+                  state: enabled
+            apiCall: gTest
+      PublishArtifacts:
+        state: enabled
+        runScript: |
+          releaseRoot="/ssd/jenkins/test_release_dir"
+          releaseDir="\${releaseRoot}/!buildVersion!/!variant!"
+          mkdir -p \${releaseDir}
+          cp -rf deployRootDir/* \${releaseDir}/
+          pushd \${releaseRoot} &>/dev/null
+          ln -sfT !buildVersion! latest
+          popd &>/dev/null
+          time curl -X PUT -n --upload-file deployRootDir/initial_loading.zip https://artifactory.elektrobit.com:443/artifactory/t2k_deliveries-releases-generic/snapshots/new-pipeline-check/!variant!_initial_loading.zip
+          echo "Uploaded from: \${releaseDir}/initial_loading.zip" > deployRootDir/!variant!_initial_loading.metadata
+          time curl -X PUT -n --upload-file deployRootDir/!variant!_initial_loading.metadata https://artifactory.elektrobit.com:443/artifactory/t2k_deliveries-releases-generic/snapshots/new-pipeline-check/!variant!_initial_loading.metadata
+        parallel:
+          t2k: 
+            apiCall: gScript
+          t2k_cf: 
+            apiCall: gScript
+      PublishManifests:
+        state: enabled
+        sequential:
+          t2k:
+            runScript: |
+              releaseBranch='tmp/pdev'
+              git --git-dir=.repo/manifests.git fetch origin \${releaseBranch}
+              git --git-dir=.repo/manifests.git reset --hard origin/\${releaseBranch}
+              cp -rf t2k_devel_!variant!.xml .repo/manifests/t2k_devel_!variant!.xml
+              pushd .repo/manifests &> /dev/null
+              git add --all && git commit -m "Devel !variant!: Release !buildVersion!"
+              git push origin HEAD:refs/heads/\${releaseBranch}
+              popd &> /dev/null
+            apiCall: gScript
+          t2k_cf:
+            # Supported variables: !buildVersion!,!workingDir!,!runNode!,!variant!
+            runScript: |
+              releaseBranch='tmp/pdev'
+              git --git-dir=.repo/manifests.git fetch origin \${releaseBranch}
+              git --git-dir=.repo/manifests.git reset --hard origin/\${releaseBranch}
+              cp -rf t2k_devel_!variant!.xml .repo/manifests/t2k_devel_!variant!.xml
+              pushd .repo/manifests &> /dev/null
+              git add --all && git commit -m "Devel !variant!: Release !buildVersion!"
+              git push origin HEAD:refs/heads/\${releaseBranch}
+              git tag -a !buildVersion! -m "!buildVersion!"
+              git push origin !buildVersion!
+              popd &> /dev/null
+            apiCall: gScript
+      PublishWorkspace:
+        state: enabled
+        releaseSubvolume: devel_example_multi_branch_%s_baseline
+        alwaysRelease: true
+        cleanOnceDone: true
+        parallel:
+          t2k: 
+            apiCall: gReleaseWorkspace
+          t2k_cf: 
+            apiCall: gReleaseWorkspace
+      Feedback:
+        state: always
+        runScript: |
+          echo "Hello AAA"
+          echo "Goodbye AAA"
+        apiCall: gFeedback

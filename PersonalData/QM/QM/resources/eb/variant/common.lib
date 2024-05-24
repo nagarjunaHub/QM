@@ -1,0 +1,308 @@
+######################### RELEASE ##################################
+# Compare with previous release to send email if there is new release for the package.
+prod_get_release_status(){
+    local release_info=${1?release_info is required}
+    local branch=${2?branch is required}
+    local type=${3?name is required}
+    local name=${4?name is required}
+    local version=${5?version is required}
+    if [[ "$(cat ${release_info} 2>/dev/null | jq -r ".${branch} | .${type} | .${name}")" != "${version}" ]] || [[ ! -f ${release_info} ]]; then
+        echo "New"
+    else
+        echo "No Change"
+    fi
+}
+
+prod_update_release_info(){
+    local release_info=${1?release_info is required}
+    local branch=${2?branch is required}
+    local type=${3?name is required}
+    local name=${4?name is required}
+    local version=${5?version is required}
+    local release_dir=${6?release_dir is required}
+    local released_candidates_to_keep=".released_candidates_to_keep"
+
+    if [ -f ${release_info}_tmp ]; then
+        cat ${release_info}_tmp | jq -r ".${branch}.${type}.${name} = \"${version}\"" >> ${release_info}_tmp_1
+        mv -f ${release_info}_tmp_1 ${release_info}_tmp
+    else
+        cat ${release_info} | jq -r ".${branch}.${type}.${name} = \"${version}\"" > ${release_info}_tmp
+    fi
+
+    if [ -f ${release_info}_prev_tmp ]; then
+        local update_prev_version="$(cat ${release_info} | jq -r ".${branch}.${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".${branch}.${type}.${name} = \"${update_prev_version}\"" >> ${release_info}_prev_tmp_1
+        mv -f ${release_info}_prev_tmp_1 ${release_info}_prev_tmp
+    else
+        local update_prev_version="$(cat ${release_info} | jq -r ".${branch}.${type}.${name}")"
+        cat ${release_info}_prev | jq -r ".${branch}.${type}.${name} = \"${update_prev_version}\"" > ${release_info}_prev_tmp
+    fi
+
+    if [[ ! "${type}" =~ .*nightly.* ]] && [[ ! "${name}" =~ .*build_name.* ]]; then
+        if [[ ! -f ${release_dir}/${released_candidates_to_keep} ]] || [[ "x$(grep -rx ${version} ${release_dir}/${released_candidates_to_keep})" == "x" ]]; then
+            echo "${version}" >> ${release_dir}/${released_candidates_to_keep}
+        fi
+    fi
+
+}
+
+
+# Generate customer release package base on release version input.
+prod_release_package_generator() {
+    local zip_pw=$(echo ${1} | base64 --decode)
+    local release_dir=${2?release_dir is required}
+    local release_version=${3?release_version is required}
+    local para_list=(${@})
+
+    # Read for every groupd of 4 parameters: name ver dir (except the first para for password, second for customer_release_dir)
+
+    if [ -d ${release_dir}/${release_version} ]; then
+        rm -rf ${release_dir}/${release_version}
+    fi
+    for ((pos=3;pos<${#};pos+=4)); do
+        name=${para_list[pos]}
+        ver=${para_list[$((pos + 1))]}
+        dir=${para_list[$((pos + 2))]}
+        file_pattern=${para_list[$((pos + 3))]}
+
+        mkdir -p ${release_dir}/${release_version}
+        find ${dir}/${ver} -iname "${file_pattern}" -type f -exec cp -rf {} ${release_dir}/${release_version}/ \;
+
+    done
+
+    pushd ${release_dir} &>/dev/null
+    # Below block of code to fulfill the ridiculous requirement of release package.
+    mkdir -p ${release_version}_1 ${release_version}_2
+    if [[ -d "${release_version}" ]]; then
+        mv -f ${release_version}/SWL_Media_IIP.zip ${release_version}_2/
+        mv -f ${release_version}/* ${release_version}_1/
+        rm -rf ${release_version}/*
+        mv -f ${release_version}_1 ${release_version}/
+        mv -f ${release_version}_2 ${release_version}/
+
+        pushd ${release_version} &>/dev/null
+        zip -P ${zip_pw} -r --symlinks ${release_version}_1.zip ${release_version}_1
+        zip -P ${zip_pw} -r --symlinks ${release_version}_2.zip ${release_version}_2
+        rm -rf ${release_version}_1 ${release_version}_2
+        popd &>/dev/null
+    fi
+    # End of the ridiculousity
+
+    for ((pos=3;pos<${#};pos+=4)); do
+        name=${para_list[pos]}
+        ver=${para_list[$((pos + 1))]}
+        dir=${para_list[$((pos + 2))]}
+
+        if [[ "${name}" == "qnx" ]]; then
+          [ -f ${dir}/${ver}/t2k_snapshot.xml ] && cp -rf ${dir}/${ver}/t2k_snapshot.xml ${release_version}/QNX_${ver}_snapshot.xml
+        elif [[ "${name}" == "aosp" ]]; then
+          [ -f ${dir}/${ver}/t2k.xml ] && cp -rf ${dir}/${ver}/t2k.xml ${release_version}/AOSP_${ver}_snapshot.xml
+        fi
+    done
+
+    popd &>/dev/null
+}
+
+# Generate customer release package base on release version input.
+prod_release_all_package_generator() {
+    local zip_pw=$(echo ${1} | base64 --decode)
+    local release_dir=${2?release_dir is required}
+    local release_version=${3?release_version is required}
+    local para_list=(${@})
+    local rfolder_list
+
+    # Read for every groupd of 4 parameters: name ver dir (except the first para for password, second for customer_release_dir)
+
+    if [ -d ${release_dir}/${release_version} ]; then
+        rm -rf ${release_dir}/${release_version}
+    fi
+    for ((pos=3;pos<${#};pos+=4)); do
+        name=${para_list[pos]}
+        ver=${para_list[$((pos + 1))]}
+        dir=${para_list[$((pos + 2))]}
+        file_pattern=${para_list[$((pos + 3))]}
+        subdir=$(echo "${name}" | cut -d'_' -f1)
+
+        mkdir -p ${release_dir}/${release_version}/${subdir}
+        find ${dir}/${ver} -iname "${file_pattern}" -type f -exec cp -rf {} ${release_dir}/${release_version}/${subdir} \;
+    done
+
+    pushd ${release_dir} &>/dev/null
+    # Below block of code to fulfill the ridiculous requirement of release package.
+    if [[ -d "${release_version}" ]]; then
+        pushd ${release_version}
+        rfolder_list=$(ls -d */)
+        for rdir in $(ls -d */); do
+            pushd ${rdir}
+            prefix=$(echo "${rdir}" | tr -d "/")
+            zip -r --symlinks ${prefix}_Qnx-M_AC-M-Swl.zip initial_loading.zip *-Delivery_*.zip
+            rm -rf initial_loading.zip *-Delivery_*.zip
+            mv -f SWL_Media_IIP.zip ${prefix}_QNX_SWL.zip
+            mv -f *RSE_*flashimage.zip ${prefix}_RSE_M.zip
+            popd &>/dev/null
+        done
+
+        zip -P ${zip_pw} -r --symlinks ${release_version}.zip ${rfolder_list}
+        rm -rf ${rfolder_list}
+        popd &>/dev/null
+    fi
+
+    popd &>/dev/null
+}
+
+# Default config:
+# Production build delete after y days, only keep build found in .released_candidates_to_keep
+# Development test build will be kept for x days.
+prod_release_clean_up() {
+    local dir=${1?dir is required}
+    local days_to_keep=${2?days_to_keep is required}
+    local released_candidates_to_keep=".released_candidates_to_keep"
+    set -x
+    for it in $(find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep}); do
+      echo "Update timestamp for $it based on latest modified file"
+      find "$it" -type d -execdir \
+         touch --reference="$(find "$it" -mindepth 1 -maxdepth 1 -printf '%T+=%p\n' \
+                                  | sort | tail -n 1 | cut -d= -f2-)" "$it" \;
+    done
+    if [ -f ${dir}/${released_candidates_to_keep} ]; then
+        for it in $(find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep}); do
+            if [[ "x$(grep -rx "$(basename ${it})" ${dir}/${released_candidates_to_keep})" == "x" ]]; then
+                rm -rf ${it}
+            fi
+        done
+    else
+        find ${dir} -maxdepth 1 -mindepth 1 -type d -mtime +${days_to_keep} -exec rm -rf {} \;
+    fi
+    set +x
+}
+
+artifactory_delete_file() {
+  local file_url=${1?argument 1 should be the artifactory file to delete}
+  echo "Deleting ${file_url}"
+  echo "by runing running: curl -sn -XDELETE ${file_url}"
+  curl -sn -XDELETE ${file_url}
+}
+
+artifactory_upload_file() {
+  local file_path=${1?argument 2 should be the path to the file to be uploaded}
+  local file_url=${2?argument 1 should be the artifactory file to delete}
+  local retry=${3:-3}
+
+  curl --retry ${retry} --progress-bar -X PUT -sn --upload-file ${file_path} ${file_url}
+}
+
+
+artifactory_artifact_age_seconds() {
+  local file_url=${1?argument 1 should be the artifactory file to delete}
+  local epoch_now=$(date +%s)
+
+  file_url=${file_url/elektrobit.com/elektrobit.com\/api\/storage} # Get the api URL for the given artifact
+  last_updated=$(curl -sn $file_url | jq -r '.lastUpdated')
+  last_updated=$(date -d $last_updated +"%s")
+
+  echo "$(($epoch_now - $last_updated))"
+}
+
+
+artifactory_old_artifact_actions() {
+  local artifact_dir=${1?artifactory directory url required}
+  local older_than=${2?older_than value required in seconds. eg., 1296000 for 15 days}
+  local action=${3:-nothing}
+
+  artifact_api_dir=${artifact_dir/elektrobit.com/elektrobit.com\/api\/storage}
+
+  local all_files=$(curl -sn $artifact_api_dir | jq -r '.children[] | select(.folder==false) | .uri')
+  old_files=""
+
+  for f in $all_files; do
+    local artifact_age=$(artifactory_artifact_age_seconds ${artifact_dir}${f})
+
+    if [[ $artifact_age -gt $older_than ]]; then
+        old_files="$old_files ${artifact_dir}${f}"
+
+        if [[ $action == "delete" ]]; then
+          artifactory_delete_file "${artifact_dir}${f}"
+        fi
+    fi
+  done
+
+  echo "Files older than ${older_than} seconds are :"
+  echo "$old_files"
+
+}
+
+get_current_patchset_from_change_number () {
+  local gerrit_host=${1?gerrit_host is required}
+  local gerrit_change_number=${2?gerrit_change_number is required}
+  local query=$(echo $(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} --format=json --current-patch-set | \
+        jq -r '.currentPatchSet | .number') | cut -d' ' -f1)
+  echo "${query}"
+}
+
+get_change_number_from_commit_sha () {
+  local gerrit_host=${1?gerrit_host is required}
+  local gerrit_change_number=${2?gerrit_change_number is required}
+  local query=$(ssh -p 29418 ${gerrit_host} gerrit query ${gerrit_change_number} \
+        --format=json --current-patch-set | jq -r '.number' | jq -r 'select (.!=null)')
+
+  echo "${query}"
+}
+
+notify_integration_completion_in_gerrit() {
+  local verbose=${1?verbose value required. Should be true or false}
+  [[ $verbose == "true" ]] && set -x
+  local source_volume=${2?source_volume required}
+  local build_name=${3?build_name required}
+  local manifest_release_file=${4?manifest_release_file required}
+  local gerrit_host=${5?gerrit host required}
+  local pipeline_type=${6?pipeline_type required}
+  local repo_manifest_release=${7?repo_manifest_release required}
+  local repo_manifest_release_revision=${8?repo_manifest_release_revision is required}
+  local aosp_gerrit_changes=${9?path to file containing aosp_gerrit_changes required}
+  local qnx_snapshot_path=${10?qnx_snapshot_path required}
+  local this_manifest=".repo/manifests/notify_this_build.xml"
+  local last_build=".repo/manifests/notify_last_build.xml"
+  pushd ${source_volume} &>/dev/null
+  repo manifest -r -o ${this_manifest}
+  rm -rf ${source_volume}/.manifest_release
+  git clone ${repo_manifest_release} ${source_volume}/.manifest_release
+  cd ${source_volume}/.manifest_release
+  git checkout ${repo_manifest_release_revision}
+  pushd ${source_volume}/.manifest_release &>/dev/null && last_snapshot=$(git log | grep nightly: | grep $build_name -A 1 | tail -1 | awk '{print $NF}') && git checkout $last_snapshot && popd &>/dev/null
+
+  ln -sfT ${source_volume}/.manifest_release/${manifest_release_file} ${source_volume}/${last_build}
+  commits_since_last_snapshot=$(repo diffmanifests --raw $(basename ${last_build}) $(basename ${this_manifest}) | grep "^ A" | awk '{print $2}')
+  gerrit_msg="Change integrated into QNX ${pipeline_type} build: ${build_name}"
+  [[ -d ${qnx_snapshot_path} ]] && gerrit_msg="${gerrit_msg} - Path: ${qnx_snapshot_path}"
+
+  for commit in ${commits_since_last_snapshot}; do
+     change_number=$(get_change_number_from_commit_sha ${gerrit_host} $commit)
+     [[ -z $change_number ]] && echo "WARNING: Could not get change number for commit-sha $commit Probably this was a commit pushed to HEAD directly." && continue
+     if [[ $(echo "$change_number" | wc -l) -gt 1 ]]; then
+         # there's more than result when searching for commit-sha because of cherry-picks/reverts.
+         # We have to find the right change number for the given commit-sha.
+         # To do that unfortunately there's no better way than querying gerrit again for each change number
+         # and matching the resulting commit-sha with the commit sha we are looping with.
+         for c in $(echo "$change_number"); do
+                 commit_sha=$(get_commit_id_from_change_number ${gerrit_host} $c)
+                 if [[ $commit_sha == $commit ]]; then
+                         change_number=$c
+                         break
+                 fi
+         done
+     fi
+     patchset_number=$(get_current_patchset_from_change_number ${gerrit_host} $change_number)
+     echo "ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m "$gerrit_msg""
+     ssh -p 29418 ${gerrit_host} gerrit review ${change_number},${patchset_number} -m \'$gerrit_msg\'
+  done
+  if [[ -f ${aosp_gerrit_changes} ]]; then
+      echo "Write snapshot info to AOSP gerrit changes"
+      for c in $(cat ${aosp_gerrit_changes}); do
+        [[ -z ${c} ]] && continue
+        echo "ssh -p 29418 ${gerrit_host} gerrit review ${c} -m "$gerrit_msg""
+        ssh -p 29418 ${gerrit_host} gerrit review ${c} -m \'$gerrit_msg\'
+      done
+  fi
+  rm -fr ${this_manifest} ${last_build} ${source_volume}/.manifest_release ${aosp_gerrit_changes}
+
+}
